@@ -201,7 +201,7 @@ sub new_fast { return bless ($_[1], $_[0]); }
 
 =cut
 
-sub description { return $_[0]->{description}; }
+sub description { return shift->{description}; }
 
 
 
@@ -217,7 +217,7 @@ sub description { return $_[0]->{description}; }
 =cut
 
 sub display_label {
-  my ($self) = @_;
+  my $self = shift;
 
   if ( ! defined $self->{display_label} ) {
 
@@ -277,7 +277,8 @@ sub get_FeatureAdaptor{
 =cut
 
 sub get_Features_by_Slice{
-  my ($self, $slice) = @_;
+  my $self  = shift;
+  my $slice = shift;
 
   return $self->get_FeatureAdaptor->fetch_all_by_Slice_FeatureSets($slice, [$self]);
 }
@@ -299,7 +300,8 @@ sub get_Features_by_Slice{
 
 
 sub get_Features_by_FeatureType{
-  my ($self, $type) = @_;
+  my $self = shift;
+  my $type = shift;
 
   return $self->get_FeatureAdaptor->fetch_all_by_FeatureType_FeatureSets($type, [$self]);
 }
@@ -394,7 +396,7 @@ sub is_attribute_set{
                Defaults to: name description display_label feature_class get_all_states
   Args[4]    : Arrayref - Optional list of FeatureSet method names each
                returning a Storable or an Array or Arrayref of Storables.
-               Defaults to: feature_type cell_type analysis get_Experiment
+               Defaults to: feature_type cell_type analysis experiment
   Example    : my %shallow_diffs = %{$rset->compare_to($other_rset, 1)};
   Description: Compare this FeatureSet to another based on the defined scalar
                and storable methods.
@@ -447,8 +449,8 @@ sub reset_relational_attributes{
       rearrange(['ANALYSIS', 'FEATURE_TYPE', 'CELL_TYPE', 'EXPERIMENT'],
       %$params_hash);
 
-  assert_ref($analysis, 'Bio::EnsEMBL::Analysis');
-  assert_ref($feature_type, 'Bio::EnsEMBL::Funcgen::FeatureType');
+  assert_ref($analysis,     'Bio::EnsEMBL::Analysis',             'Analysis');
+  assert_ref($feature_type, 'Bio::EnsEMBL::Funcgen::FeatureType', 'FeatureType');
 
   if( $self->cell_type && 
       ! check_ref($cell_type, 'Bio::EnsEMBL::Funcgen::CellType') ){
