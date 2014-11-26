@@ -155,17 +155,18 @@ sub _get_cmd_line_options {
 sub _connect_to_devDB {
   my ($cfg) = @_;
 
-    my $db_a = Bio::EnsEMBL::Funcgen::DBSQL::DBAdaptor->new (
-      -user       => $cfg->{dev_db}->{user},
-      -pass       => $cfg->{dev_db}->{pass},
-      -host       => $cfg->{dev_db}->{host},
-      -port       => $cfg->{dev_db}->{port},
-      -dbname     => $cfg->{dev_db}->{dbname},
-      -dnadb_name => $cfg->{dna_db}->{dbname},
-      );  
-    $db_a->dbc->do("SET sql_mode='traditional'");
-
-    return($cfg->{dba_dev} = $db_a);
+  my $db_a = Bio::EnsEMBL::Funcgen::DBSQL::DBAdaptor->new (
+    -user       => $cfg->{dev_db}->{user},
+    -pass       => $cfg->{dev_db}->{pass},
+    -host       => $cfg->{dev_db}->{host},
+    -port       => $cfg->{dev_db}->{port},
+    -dbname     => $cfg->{dev_db}->{dbname},
+    -dnadb_name => $cfg->{dna_db}->{dbname},
+    );  
+  $db_a->dbc->do("SET sql_mode='traditional'");
+  say "\nConnected to devDB: " . $cfg->{dev_db}->{dbname} ."\n";
+ 
+  return($cfg->{dba_dev} = $db_a);
 }
 #-------------------------------------------------------------------------------
 ################################################################################
@@ -199,6 +200,7 @@ sub _connect_to_trackingDB {
     -dnadb_name => $cfg->{dna_db}->{dbname},
     );  
   $db_a->dbc->do("SET sql_mode='traditional'");
+  say "\nConnected to trDB: " . $cfg->{efg_db}->{dbname}  ."\n";
 
   return($cfg->{dba_tracking} = $db_a);
 }
@@ -336,6 +338,14 @@ sub _migrate_feature_set {
     if(defined $dev_rs){
       _compare_result_set($cfg, $tr_ds, $dev_ds, $tr_rs, $dev_rs);
     }
+    
+    my $tr_rs_exp = $tr_rs->experiment;
+    my $dev_exp = $cfg->{dev_adaptors}->{ex}->fetch_by_name($tr_rs_exp->name);
+    if(defined $dev_exp){
+      _compare_experiment($cfg, $tr_rs, $dev_rs, $tr_rs_exp, $dev_exp);
+    }
+    
+    # say "RS Exp:" .$tr_rs->experiment->name;
   }
   die;
 
@@ -1358,10 +1368,23 @@ sub _compare_result_set {
   my $error;
   $error = _check_tmp($tr_rs->compare_to($dev_rs,'-1'));
   if(defined $error){
+    my $err = (split(/ -> /,$error))[0];
+    say "Method: $err";
+      say dump_data($tr_rs->$err,1,1);
+      say dump_data($dev_rs->$err,1,1);
+      my $t = dump_data($dev_rs->$err,1,1);
+      say "t: $t";
     my $msg;
     $msg .= "\n$error";
     $msg .= "[Tr]ResultSet  [$tr_rs_name]\n[Dev]ResultSet [$dev_rs_name]\n";
     $msg .= "[Tr]DataSet:  [$tr_ds_name]\n[Dev]DataSet: [$dev_ds_name]\n";
+    if($err){
+      my $method = $tr_rs->can($err);
+      if($method){}
+      $msg .= "Method name: >>> $err <<<\n"; 
+      $msg .= "[Tr]:\n".dump_data($tr_rs->$err,1,1);
+      $msg .= "[Dev]:\n".dump_data($dev_rs->$err,1,1);
+    }
     throw($msg);
   }
 
@@ -1434,6 +1457,7 @@ sub _compare_result_set {
     my $dev_iss = $cfg->{dev_adaptors}->{iss}->fetch_by_name($tr_iss->name);
     if(defined $dev_iss){
       _compare_input_subset($tr_rs, $dev_rs, $tr_iss, $dev_iss);
+      
     }
   }
 
@@ -1527,15 +1551,15 @@ sub _compare_feature_set {
 sub _compare_input_subset {
   my  ($tr_rs, $dev_rs, $tr_iss, $dev_iss) = @_;
 
-  my $tr_rs_name     = $tr_rs->name;
-  my $dev_rs_name    = $tr_rs->name;
-  my $tr_rs_ct_name  = $tr_rs->cell_type->name;
+  my $tr_rs_name      = $tr_rs->name;
+  my $dev_rs_name     = $tr_rs->name;
+  my $tr_rs_ct_name   = $tr_rs->cell_type->name;
   my $dev_rs_ct_name  = $dev_rs->cell_type->name;
-  my $tr_rs_ft_name  = $tr_rs->feature_type->name;
+  my $tr_rs_ft_name   = $tr_rs->feature_type->name;
   my $dev_rs_ft_name  = $dev_rs->feature_type->name;
 
-  my $tr_iss_name    = $tr_iss->name;
-  my $dev_iss_name   = $tr_iss->name;
+  my $tr_iss_name     = $tr_iss->name;
+  my $dev_iss_name    = $tr_iss->name;
 
   my $tr_iss_ct_name  = $tr_rs->cell_type->name;
   my $dev_iss_ct_name = $dev_rs->cell_type->name;
@@ -1544,7 +1568,14 @@ sub _compare_input_subset {
   my $dev_iss_ft_name = $dev_rs->feature_type->name;
   
   my $tr_iss_anal     = $tr_iss->analysis_type->logic_name;
-  my $dev_iss_anal   = $dev_iss->analysis_type->logic_name;
+  my $dev_iss_anal    = $dev_iss->analysis_type->logic_name;
+
+  my $tr_rs_exp_name  = $tr_rs->experiment->name;
+  my $dev_rs_exp_name = $dev_rs->experiment->name;
+
+  my $tr_iss_exp_name  = $tr_iss->experiment->name;
+  my $dev_iss_exp_name = $dev_iss->experiment->name;
+
 
   my $error;
   $error = _check_tmp($tr_iss->compare_to($dev_iss,'-1'));
@@ -1618,6 +1649,21 @@ sub _compare_input_subset {
     $msg .= "[Dev]InputSubset FeatureType: [$dev_iss_ft_name]\n";
   }
 
+  if($tr_iss->experiment->dbID != $tr_rs->experiment->dbID){
+    my $msg;
+    $msg .= "\n[Tr]Experiment\n";
+    $msg .= "[Tr]ResultSet  [$tr_rs_name]\n[Tr]InputSubset [$tr_iss_name]\n";
+    $msg .= "[Tr]ResultSet   Experiment:  [$tr_rs_exp_name]\n";
+    $msg .= "[Tr]InputSubset Experiment: $tr_iss_exp_name\n";
+    throw($msg);
+  }
+  if($dev_iss->experiment->dbID != $dev_rs->experiment->dbID){
+    my $msg;
+    $msg .= "\n[Dev]FeatureType\n";
+    $msg .= "[Dev]ResultSet  [$dev_rs_name]\n[Dev]InputSubset [$dev_iss_name]\n";
+    $msg .= "[Dev]ResultSet   Experiment: [$dev_rs_exp_name]\n";
+    $msg .= "[Dev]InputSubset Experiment: [$dev_iss_exp_name]\n";
+  }
 
 
 
@@ -1644,17 +1690,50 @@ sub _compare_input_subset {
 
 #-------------------------------------------------------------------------------
 #experiment_id, name, experimental_group_id, date, primary_design_type, description, mage_xml_id
+
+#Compare EXP linked to RS/IS
+# Compare EXP Group
+
 sub _compare_experiment {
-  my ($diffs,$tr, $dev) = @_;
+  my ($cfg, $tr_rs, $dev_rs, $tr_exp, $dev_exp) = @_;
 
-  my $tmp = $tr->{experiment}->compare_to($dev->{experiment},'-1');
-  _check_tmp($tmp);
+  my $tr_rs_name      = $tr_rs->name;
+  my $dev_rs_name     = $dev_rs->name;
+  my $tr_exp_group_name  = $tr_exp->get_ExperimentalGroup->name;
+  my $dev_exp_group_name = $tr_exp->get_ExperimentalGroup->name;
 
+  my $error;
+  $error = _check_tmp($tr_exp->cell_type->compare_to($dev_exp->cell_type, -1));
+  if(defined $error){
+    my $msg;
+    $msg .= "\nExperiment \n$error";
+    $msg .= "[Tr]ResultSet:  [$tr_rs_name]\n[Dev]ResultSet: [$dev_rs_name]";
+    throw($msg);
+  }
 
-  $tmp = $tr->{experiment}->experimental_group->compare_to($dev->{experiment}->experimental_group, -1);
-  _check_tmp($diffs, $tmp, 'experiment', 'experimental_group');
+  $error = _check_tmp($tr_exp->compare_to($dev_exp->feature_type, -1));
+  if(defined $error){
+    my $msg;
+    $msg .= "\nResultSet Experiment\n$error";
+    $msg .= "[Tr]ResultSet:  [$tr_rs_name]\n[Dev]ResultSet: [$dev_rs_name]";
+    throw($msg);
+  }
 
-  return $diffs;
+  if($dev_exp->experiment->dbID != $dev_rs->experiment->dbID){
+    my $msg;
+    $msg .= "\n[Dev]Experiment\n";
+    $msg .= "[Dev]ResultSet  [$dev_rs_name]\n[Dev]InputSubset [$dev_iss_name]\n";
+    $msg .= "[Dev]ResultSet   Experiment: [$dev_rs_exp_name]\n";
+    $msg .= "[Dev]InputSubset Experiment: [$dev_iss_exp_name]\n";
+  }
+
+  if($tr_exp_group_name ne $dev_exp_group_name){ 
+    my $msg;
+    $msg .= "\n[Dev]Experiment\n";
+    $msg .= "[Dev]ResultSet  [$dev_rs_name]\n";
+    $msg .= "[Dev]ResultSet   Experiment: [$dev_rs_exp_name]\n";
+
+  }
 
 }
 #-------------------------------------------------------------------------------
