@@ -1697,10 +1697,13 @@ sub _compare_input_subset {
 sub _compare_experiment {
   my ($cfg, $tr_rs, $dev_rs, $tr_exp, $dev_exp) = @_;
 
-  my $tr_rs_name      = $tr_rs->name;
-  my $dev_rs_name     = $dev_rs->name;
-  my $tr_exp_group_name  = $tr_exp->get_ExperimentalGroup->name;
-  my $dev_exp_group_name = $tr_exp->get_ExperimentalGroup->name;
+  my $tr_rs_name          = $tr_rs->name;
+  my $dev_rs_name         = $dev_rs->name;
+  my $tr_rs_exp_name      = $tr_rs->experiment->name;
+  my $dev_rs_exp_name     = $dev_rs->experiment->name;
+  my $tr_exp_group_name   = $tr_exp->get_ExperimentalGroup->name;
+  my $dev_exp_group_name  = $tr_exp->get_ExperimentalGroup->name;
+
 
   my $error;
   $error = _check_tmp($tr_exp->cell_type->compare_to($dev_exp->cell_type, -1));
@@ -1722,9 +1725,8 @@ sub _compare_experiment {
   if($dev_exp->experiment->dbID != $dev_rs->experiment->dbID){
     my $msg;
     $msg .= "\n[Dev]Experiment\n";
-    $msg .= "[Dev]ResultSet  [$dev_rs_name]\n[Dev]InputSubset [$dev_iss_name]\n";
+    $msg .= "[Dev]ResultSet  [$dev_rs_name]\n";
     $msg .= "[Dev]ResultSet   Experiment: [$dev_rs_exp_name]\n";
-    $msg .= "[Dev]InputSubset Experiment: [$dev_iss_exp_name]\n";
   }
 
   if($tr_exp_group_name ne $dev_exp_group_name){ 
