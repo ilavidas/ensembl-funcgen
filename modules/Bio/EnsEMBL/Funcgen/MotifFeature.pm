@@ -65,6 +65,8 @@ package Bio::EnsEMBL::Funcgen::MotifFeature;
 
 use strict;
 use warnings;
+
+use Bio::EnsEMBL::Utils::Scalar    qw( assert_ref );
 use Bio::EnsEMBL::Utils::Argument  qw( rearrange );
 use Bio::EnsEMBL::Utils::Exception qw( throw );
 
@@ -74,7 +76,7 @@ use base qw(Bio::EnsEMBL::Feature Bio::EnsEMBL::Funcgen::Storable);
 =head2 new
 
  
-  Arg [-SCORE]          : (optional) int - Score assigned by analysis pipeline
+  Arg [-SCORE]          : (optional) int - Score given by the motif mapper.
   Arg [-SLICE]          : Bio::EnsEMBL::Slice - The slice on which this feature is.
   Arg [-BINDING_MATRIX] : Bio::EnsEMBL::Funcgen::BindingMatrix - Binding Matrix associated to this feature.
   Arg [-START]          : int - The start coordinate of this feature relative to the start of the slice
@@ -108,22 +110,16 @@ use base qw(Bio::EnsEMBL::Feature Bio::EnsEMBL::Funcgen::Storable);
 
 sub new {
   my $caller = shift;
-	
-  my $class = ref($caller) || $caller;
-  my $self = $class->SUPER::new(@_);
-  my $bmatrix;
-  ($self->{score}, $bmatrix,   $self->{display_label}, $self->{interdb_stable_id}) 
+  my $class  = ref($caller) || $caller;
+  my $self   = $class->SUPER::new(@_);
+  
+  ($self->{score}, $self->{binding_matrix}, $self->{display_label}, $self->{interdb_stable_id}) 
    = rearrange(['SCORE', 'BINDING_MATRIX', 'DISPLAY_LABEL', 'INTERDB_STABLE_ID'], @_);
     
-
-  if(! (ref($bmatrix) && $bmatrix->isa('Bio::EnsEMBL::Funcgen::BindingMatrix'))){
-	throw('You must pass be a valid Bio::EnsEMBL::Funcgen::BindingMatrix');
-  }
-
-  $self->{binding_matrix} = $bmatrix;
-
+  assert_ref($self->binding_matrix, 'Bio::EnsEMBL::Funcgen::BindingMatrix');
   return $self;
 }
+
 
 =head2 new_fast
 
@@ -138,9 +134,7 @@ sub new {
 
 =cut
 
-sub new_fast {
-  return bless ($_[1], $_[0]);
-}
+sub new_fast { return bless ($_[1], $_[0]); }
 
 
 =head2 binding_matrix
@@ -154,9 +148,7 @@ sub new_fast {
 
 =cut
 
-sub binding_matrix{
-  return shift->{binding_matrix};
-}
+sub binding_matrix{ return shift->{binding_matrix}; }
 
 =head2 feature_type
 
@@ -169,26 +161,22 @@ sub binding_matrix{
 
 =cut
 
-
-sub feature_type{
-  return shift->{binding_matrix}->feature_type;
-}
+sub feature_type{ return shift->{binding_matrix}->feature_type; }
 
 
 =head2 score
 
   Example    : my $score = $feature->score();
-  Description: Getter for the score attribute for this feature. 
-  Returntype : double
+  Description: Getter for the score attribute for this feature. This is the
+               score given by the motif mapping software.
+  Returntype : Scalar (double)
   Exceptions : None
   Caller     : General
   Status     : Low Risk
 
 =cut
 
-sub score {
-  return shift->{score};
-}
+sub score { return shift->{score}; }
 
 
 =head2 display_label
@@ -278,7 +266,7 @@ sub associated_annotated_features{
 
 sub is_position_informative {
   my $self     = shift;
-  my $position = shift || throw 'Need a position argument';
+  my $position = shift || throw('Need tp specify a valid position argument');
 
   if( ($position < 1) || 
       ($position > $self->binding_matrix->length) ){
@@ -318,10 +306,8 @@ sub is_position_informative {
 
 sub infer_variation_consequence{
   my ($self, $vf, $linear) = @_;
+  assert_ref($vf, 'Bio::EnsEMBL::Variation::VariationFeature');
 
-  if(! $vf->isa('Bio::EnsEMBL::Variation::VariationFeature')){
-    throw "We expect a Bio::EnsEMBL::Variation::VariationFeature object, not a ".$vf->class;
-  }
 
   #See if these checks are required or if there are more efficient ways to do the checks...
   #if(($self->slice->seq_region_name ne $vf->slice->seq_region_name) ||
@@ -356,6 +342,7 @@ sub infer_variation_consequence{
   
 }
 
+
 =head2 interdb_stable_id
 
   Arg [1]    : (optional) int - stable_id e.g 1
@@ -369,9 +356,7 @@ sub infer_variation_consequence{
 
 =cut
 
-sub interdb_stable_id {
-  return shift->{interdb_stable_id};
-}
+sub interdb_stable_id { return shift->{interdb_stable_id}; }
 
 
 =head2 summary_as_hash
