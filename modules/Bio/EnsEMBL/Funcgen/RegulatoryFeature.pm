@@ -141,15 +141,17 @@ sub new {
   my $class = ref($caller) || $caller;
   my $self = $class->SUPER::new(@_);
 
-  my ($stable_id, $attr_cache, $bin_string, $projected)
-    = rearrange(['STABLE_ID', 'ATTRIBUTE_CACHE', 'BINARY_STRING', 'PROJECTED'], @_);
+  my ($stable_id, $attr_cache, $bin_string, $projected, $has_evidence, $cell_type_count)
+    = rearrange(['STABLE_ID', 'ATTRIBUTE_CACHE', 'BINARY_STRING', 'PROJECTED', 'HAS_EVIDENCE', 'CELL_TYPE_COUNT'], @_);
 
   #None of these are mandatory at creation
   #under different use cases
-  $self->{binary_string} = $bin_string if defined $bin_string;
-  $self->{stable_id}     = $stable_id  if defined $stable_id;
-  $self->{projected}     = $projected  if defined $projected;
-  $self->attribute_cache($attr_cache)  if $attr_cache;
+  $self->{binary_string} = $bin_string    if defined $bin_string;
+  $self->{stable_id}     = $stable_id     if defined $stable_id;
+  $self->{projected}     = $projected     if defined $projected;
+  $self->{has_evidence}  = $has_evidence  if defined $has_evidence;
+  $self->{cell_type_count}  = $cell_type_count  if defined $cell_type_count;
+  $self->attribute_cache($attr_cache)     if $attr_cache;
 
   return $self;
 }
@@ -194,7 +196,7 @@ sub display_label {
 
 =cut
 
-sub display_id {  return $_[0]->{stable_id}; }
+sub display_id {  return shift->{stable_id}; }
 
 
 =head2 binary_string
@@ -209,7 +211,7 @@ sub display_id {  return $_[0]->{stable_id}; }
 
 =cut
 
-sub binary_string{ return $_[0]->{binary_string}; }
+sub binary_string{ return shift->{binary_string}; }
 
 
 =head2 stable_id
@@ -328,6 +330,30 @@ sub has_attribute{
   return exists ${$self->attribute_cache}{$fclass}{$dbID};
 }
 
+=head2 has_evidence
+
+  Arg [1]     : None
+  Returntype  : Boolean 
+  Exceptions  : None
+  Description : Returns 1 if has_evidence = 1, nothing otherwise
+
+=cut
+
+sub has_evidence { return shift->{has_evidence}; }
+
+
+=head2 cell_type_count
+
+  Arg [1]     : None 
+  Returntype  : SCALAR 
+  Exceptions  : None
+  Description : Returns the amount of cells where this RegFeat is active
+
+=cut
+
+sub cell_type_count { shift->{cell_type_count}; }
+
+
 =head2 get_focus_attributes
 
   Arg [1]    : None
@@ -420,14 +446,6 @@ sub _sort_attributes{
 
 sub attribute_cache{
   my ($self, $attr_hash) = @_;
-
-#  if(! defined $attr_hash){
-#	$self->regulatory_attributes; #Fetch the attrs?
-#
-#
-#	#Do we need to do this now we have separated the caches?
-#
-#  }
 
   if(defined $attr_hash){
 
@@ -788,7 +806,49 @@ sub get_other_RegulatoryFeatures{
 }
 
 
+=head2 summary_as_hash
+
+  Example       : $regf_summary = $regf->summary_as_hash;
+  Description   : Retrieves a textual summary of this RegulatoryFeature.
+  Returns       : Hashref of descriptive strings
+  Status        : Intended for internal use (REST)
+
+=cut
+
+#why has has_evidence been transposed to activity_evidence?
+
+sub summary_as_hash {
+  my $self   = shift;
+
+  #Use cell_type count here to detect new build
+  #but this is set to 0 for cell type specific features
+  #my %build_specific_params;
+  #my $ctype_cnt = $self->cell_type_count;
+
+  #if($ctype_cnt){
+  #  $build_specific_params{cell_type_count}    = $ctype_cnt;
+  #  $build_specific_params{activity_envidence} = $self->has_evidence;
+  #}
+  #else{
+  #  $build_specific_params{projected} = $self->projected;
+  #}
+
+  return
+   {ID                      => $self->stable_id,
+    cell_type               => $self->cell_type->name,
+    bound_start             => $self->bound_seq_region_start,
+    bound_end               => $self->bound_seq_region_end,
+    start                   => $self->seq_region_start,
+    end                     => $self->seq_region_end,
+    strand                  => $self->strand,
+    seq_region_name         => $self->seq_region_name,
+    activity_evidence       => $self->has_evidence,
+    description             => $self->feature_type->description,
+    feature_type            => "regulatory",
+    #%build_specific_params, 
+   };
+}
 
 1;
 
-__END__
+

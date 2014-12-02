@@ -30,17 +30,21 @@ configure_hive.pl
 
 =head1 SYNOPSIS
 
-  configure_hive.pl -host <string> -user <String> -pass <String> -dbname <String> -data_root <String> \
-    -hive_script_dir <String> -configs <String> ... \
-    [-port <Int> -dnadb_host <String> -dnadb_user <String> -dnadb_pass <String> -dnadb_name <String> \
-     -dnadb_port <Int> -list -help -man]
+  configure_hive.pl [-configs <String> ...] \          #Normally all that is required when running within pipeline environent
+    [-host <string> -user <String> -pass <String> -dbname <String> \
+     -data_root <String> -hive_script_dir <String> ] \ #Mandatory params specified by pipeline enviornment
+    [-port <Int> -dnadb_host <String> -dnadb_user <String> -dnadb_pass <String> 
+     -dnadb_name <String> -dnadb_port <Int> ] \        #Optional params specified by the pipeline environment
+    [ -list -help -man ] \                             # Truly optional params
 
 =head1 PARAMETERS
 
   Mandatory:
+    -configs          <String> ...  Config module names e.g. Peaks (use -list for full lst)
+
+  Madatory if not run within pipeline environment:
     -data_root        <String>      Root data directory
     -hive_script_dir  <String>      Hive scripts directory
-    -configs          <String> ...  Config module names e.g. Peaks (use -list for full lst)
     -host             <String>      Funcgen DB host
     -user             <String>      Funcgen DB user
     -pass             <String>      Funcgen DB pass
@@ -53,6 +57,7 @@ configure_hive.pl
     -dnadb_pass       <String>      Core DB pass
     -dnadb_name       <String>      Core DB name
     -dnadb_port       <Int>         Core DB port
+    -force            Forces analysis top up, even if config already exists in DB
     -list             Print a list of the supported config module names
     -help             Prints a helpful message
     -man              Prints the man page
@@ -76,10 +81,13 @@ use Bio::EnsEMBL::Funcgen::Utils::DBAdaptorHelper qw( process_DB_options
                                                       create_Funcgen_DBAdaptor_from_options
                                                       create_DBAdaptor_from_params );
 use Bio::EnsEMBL::Funcgen::Utils::EFGUtils        qw( run_system_cmd
-                                                      url_from_DB_params
-                                                      add_hive_url_to_meta );
+                                                      url_from_DB_params 
+                                                      add_DB_url_to_meta );
+use Bio::EnsEMBL::Funcgen::Hive::Utils            qw( inject_DataflowRuleAdaptor_methods );
 
-#$| = 1;#for debug
+#TODO
+# 1 Genericise pipeline param passing. Current allow_no_arch and archive_root are hardcoded.
+
 
 my %config_info = 
  (
@@ -110,15 +118,16 @@ my %config_labels =
 #but we may want to move them there, if we are to allow
 #more than one hive to run on the same DB.
 
-&main(@ARGV);
+&main();
 
 
 sub main{
-  my @tmp_args = @_;
-  my (@configs, $species, $data_root, $hive_script_dir, $list);               
+  my @tmp_args = @ARGV;
+  my (@configs, $species, $data_root, $hive_script_dir, $list);   
+  my ($archive_root, $allow_no_arch, $force);            
   my $db_opts  = get_DB_options_config();#This will get opts for funcgen, core and pipeline by default
   
-  GetOptions 
+  GetOptions
    (#Mandatory
     %{$db_opts},
     'configs=s{,}'      => \@configs,
@@ -126,6 +135,8 @@ sub main{
     'hive_script_dir=s' => \$hive_script_dir,
   
     #Optional
+    'archive_root=s'    => \$archive_root,
+    'allow_no_archive'  => \$allow_no_arch,
     #'drop' => \$drop,#implement this when we use the updated version of init_pipeline?
     'species=s'   => \$species,
     'list'        => \$list,
@@ -143,7 +154,7 @@ sub main{
   #add some sprintf lpad action in here
   push @valid_confs, map("$_ (= ".join(' ', @{$config_labels{$_}}[1..$#{$config_labels{$_}}]).')', 
                          keys %config_labels);
-  %config_info = (%config_info, %config_labels); #Add labels after sort
+  %config_info = (%config_info, %config_labels);
   
   if($list){
     print "Valid config modules/labels are:\n\t".join("\n\t", @valid_confs)."\n";
@@ -154,10 +165,31 @@ sub main{
   
   if(! defined $hive_script_dir){
     throw('-hive_script_dir is a mandatory parameter');  
-  }      
-  elsif(! -d $hive_script_dir){
+  }elsif(! -d $hive_script_dir){
     throw("-hive_script_dir is not a valid directory:\t${hive_script_dir}");
   }
+  
+  #Do some sensible pre-init dir checking, 
+  #Thiss would be caught by the pipeline, but we don't want to 
+  #have to tidy up if these are wrong
+  
+  if(! defined $data_root){
+    throw('-data_root is a mandatory parameter');  
+  }elsif(! -d $data_root){
+    throw("-data_root is not a valid directory:\t${data_root}");
+  }
+  
+  my $arch_params = '';
+  
+  if(defined $archive_root){
+    
+    if(! -d $archive_root){
+      throw("-archive_root is not a valid directory:\t${archive_root}");  
+    }
+    $arch_params .= " -archive_root $archive_root ";  
+  }
+  
+  $arch_params .= ' -allow_no_archive 1 ' if defined $allow_no_arch;
   
   if(! @configs){
     pod2usage(-exitval => 1, 
@@ -166,7 +198,6 @@ sub main{
   }
   
   ### HANDLE DB PARAMS ###
-  
   my $db_script_args = process_DB_options($db_opts, ['funcgen', 'core', 'pipeline'], undef, 'script');
   my $pdb_params     = ${&process_DB_options($db_opts, ['pipeline'])}{pipeline};
   my $db             = create_Funcgen_DBAdaptor_from_options($db_opts, 'pass');
@@ -194,21 +225,21 @@ sub main{
   
   
   ### INITIALISE/CREATE PIPELINE DB ###
-  my $pipeline_params = "-data_root_dir $data_root -pipeline_name ".$pdb_params->{'-dbname'}.' '.
+  my $pipeline_params = "$arch_params -data_root_dir $data_root -pipeline_name ".$pdb_params->{'-dbname'}.' '.
     $db_script_args->{funcgen}.' '.$db_script_args->{core}.' '.$db_script_args->{pipeline};
   $pipeline_params .= " -species $species " if defined $species;  
   
-  my ($ntable_a, $pdb);  
+  my ($cmd, $ntable_a, $pdb);  
   eval { $pdb = create_DBAdaptor_from_params($pdb_params, 'hive', 1); };
   
   if($@){ #Assume the DB hasn't been created yet  
     #init the pipline with the first conf
     my $first_conf = shift @confs;
-    my $init_cmd   = "perl $hive_script_dir/init_pipeline.pl ".
+    $cmd = "perl $hive_script_dir/init_pipeline.pl ".
       "Bio::EnsEMBL::Funcgen::Hive::Config::${first_conf} $pipeline_params";
     
     print "\n\nINITIALISING DATABASE:\t".$pdb_params->{'-dbname'}."\n";
-    run_system_cmd($init_cmd);  
+    run_system_cmd($cmd);  
     
     $pdb      = create_DBAdaptor_from_params($pdb_params, 'hive');
     $ntable_a = $pdb->get_NakedTableAdaptor;
@@ -221,14 +252,16 @@ sub main{
     $ntable_a->table_name('meta');
   }
    
-  add_hive_url_to_meta(url_from_DB_params($pdb_params), $db);
+  my $hive_url = url_from_DB_params($pdb_params); 
+  add_DB_url_to_meta('hive', $hive_url, $db);
   
   ### PERFORM ANALYSIS_TOPUP ###
   my $conf_key   = 'hive_conf';
   
-  #my @meta_confs = @{$mc->list_value_by_key($conf_key)};
-  my @meta_confs = @{$ntable_a->fetch_all_by_meta_key($conf_key)};
-  
+  #my @meta_confs = @{$mc->list_value_by_key($conf_key)};#old method used this
+  my @meta_confs = map {$_->{meta_value}} @{$ntable_a->fetch_all_by_meta_key($conf_key)};
+  my $dfr_adaptor = $pdb->get_DataflowRuleAdaptor;
+  inject_DataflowRuleAdaptor_methods($dfr_adaptor); #Injects get_semaphoring_analysis_ids
   
   foreach my $conf(@confs){
    
@@ -238,13 +271,13 @@ sub main{
     else{ #Add new config!
       
       #Handle potential resetting of pipeline wide 'can_run_AnalaysisLogicName' params 
-      #These should be in the meta table and should be cached if they are set to 1
-      #as there is a danger that a subsequent top up of an preceding conf may reset this to 0
-      #meaning that flow would not occur from the conf just added, which precedes
-      #a conf which has previous been initialised 
-      #Put this method in HiveUtils? (with add_hive_url_to_meta?)
-      #where else would it be used?      
-      my $meta_key        = 'can_run_%';
+      #These should be in the meta table and should be cached if they are 'true' 
+      #as there is a danger that a subsequent top up of an upsteam conf may reset this to 0
+      #This would result dataflow not occuring from the conf just added through the link 
+      #analysis to the next conf(which has be added previously)
+      #Put this method in HiveUtils? (with add_hive_url_to_meta?) where else would it be used?
+                 
+      my $meta_key        = 'can_%';
       my %meta_key_values = %{$ntable_a->fetch_all_like_meta_key_HASHED_FROM_meta_key_TO_meta_value($meta_key)};
       
       #now test failures
@@ -252,32 +285,98 @@ sub main{
       #$ntable_a->fetch_all_like_meta_name_and_test_HASHED_FROM_meta_name_TO_meta_value($meta_key);
       #Both of these die nicely, but should probably throw?
       #die('should have failed by now');
-      
-      
+            
       #Now do the top up
-      my $topup_cmd = "perl $hive_script_dir/init_pipeline.pl Bio::EnsEMBL::Funcgen::Hive::Config::${conf} ".
+      $cmd = "perl $hive_script_dir/init_pipeline.pl Bio::EnsEMBL::Funcgen::Hive::Config::${conf} ".
         ' -analysis_topup '.$pipeline_params;  
-      #warn $topup_cmd."\n";
       print "\n\nPERFORMING ANALYSIS TOPUP:\t".$conf."\n";
       
       #This will not catch non-fatal error output.
-      run_system_cmd($topup_cmd);
+      run_system_cmd($cmd);
       
       #Reset can_run_AnalysisLogicName keys first, so we never assume that this has 
       #been done should things fail after adding the hive_conf key
       
+      #We need to do these in order, with semaphored analyses reset last
+      #As all link analyses are marked as DONE, when resetting a funnel job
+      #before it's DONE fan jobs the beekeeper will look at the fan jobs 
+      #and as they are all done will mark the funnel as READY insterad of SEMAPHORED
+      #Even a 2nd attempt at resetting the funnel jobs will not work in this case
+      #As they are seen as READY and effectively already reset :(
+      #we may also need to run beekeeper -balance_semphores 
+      #but this should be used with caution as it can go wrong.
+      
+      #Can we get the semaphore info from the DataFlowRuleAdaptor?
+      
+      
+      #We need to pre-process these to order them such that the funnel jobs are reset last
+      #We will need to bring back all the DataflowRules for this
+      #as the funnel_dataflow_rule_id will likely be in a non-link analysis
+      #let's do a direct SQL approach for this, rather than getting all the analyses
+      
+      #will -reset_all_bobs_for_analysis even reset to SEMAPHORED?
+      #We could do this manually will an update and then -balance_semaphores
+      
+      
+      my @can_run_keys;
+      
+      
       foreach my $can_run_key(keys %meta_key_values){
-        #Don't hard code this for 1, just in case the original value was different for some reason
+        (my $lname = $can_run_key) =~ s/^can_//o; 
         
+        warn "push/unshift $lname, $can_run_key";
+        
+        if($dfr_adaptor->get_semaphoring_analysis_ids_by_logic_name($lname)){
+          push @can_run_keys, $can_run_key;   
+        }
+        else{
+          unshift @can_run_keys, $can_run_key;  
+        }   
+      }
+      
+      
+      foreach my $can_run_key(@can_run_keys){
+        
+      
         if(scalar(@{$meta_key_values{$can_run_key}}) != 1){
+          #this should not be possible as we are fetching a hash
           throw("Found multiple entries for meta_key $can_run_key:\t".join(' ', @{$meta_key_values{$can_run_key}}));  
         }
         
-        my $can_run_value = $meta_key_values{$can_run_key}->[0];
+        #This is getting the old value! Not the new one!
+        my $old_value = $meta_key_values{$can_run_key}->[0];
+        my $new_value = $ntable_a->fetch_by_meta_key_TO_meta_value($can_run_key); 
+        #warn "testing $can_run_key with values(new/old):\t".$new_value.' / '.$old_value;
         
-        if($can_run_value){ #is defined and not 0
+        if($old_value){ #is defined and not 0
+        
+          if(! $new_value){
+            die("Failed to process link analyses for $conf. $can_run_key meta_value has been reset from 1 to $new_value");  
+          }
+        }
+        elsif($new_value){ #&& ! $old_value
+       
           my $meta_id = $ntable_a->fetch_by_meta_key_TO_meta_id($can_run_key);            #PRIMARY KEY
-          $ntable_a->update_meta_value({meta_id=>$meta_id, meta_value =>$can_run_value}); #AUTOLOADED
+          #$ntable_a->update_meta_value({meta_id=>$meta_id, meta_value =>$can_run_value}); #AUTOLOADED
+       
+          #Now reset the analysis if the value matches this config
+          #i.e. we have just topped up with a downstream config, and want to reset and link
+          #analyses which may have run.
+          #$can_run_key will be double quoted as it is loaded from the config
+          
+          #Currently this will reset all DONE jobs. #This means that if we have 2 configs
+          #which specify they're namsespace as the value, then truly DONE jobs will be reset
+          #why was this change from 1 to config name?
+          #The change from 0 to 1 enough here
+          #Probably need to change this back?
+          (my $can_run_analysis = $can_run_key) =~ s/^can_//o;
+          
+          #if($can_run_value eq "\"$conf\""){
+            $cmd = "perl $hive_script_dir/beekeeper.pl -url $hive_url --reset_all_jobs_for_analysis $can_run_analysis";
+            print "\nRESETTING LINK ANALYSIS JOBS FOR:\t$can_run_analysis\n";
+            run_system_cmd($cmd);
+            print "\nRESET LINK ANALYSIS JOBS FOR:\t$can_run_analysis\n";
+          #}
         }
       }
       

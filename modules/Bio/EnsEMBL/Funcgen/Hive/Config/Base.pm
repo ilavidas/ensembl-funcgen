@@ -124,13 +124,29 @@ use base qw(Bio::EnsEMBL::Hive::PipeConfig::HiveGeneric_conf);
 # at least do the required thing dependant on the order in which the configs
 # are topped up.
 
+
+#To do
+# 1 Move species & assembly to BaseDB?
+
 sub default_options {
   my $self = $_[0];  
   
   return {
     %{$self->SUPER::default_options},    
     #ensembl_cvs_root_dir => $ENV{'SRC'},   #Now set in env as is mandatory  requirement for loading default config 
-    bin_dir              => '/software/ensembl/funcgen',
+    
+    
+    bin_dir              => undef,#'/software/ensembl/funcgen',
+    #This is preventing things being picked up from $PATH
+    #bin_dir should really only be defined if all programs are located in the same dir
+    #or an an analysis level, to override $PATH or specify something which isn't in $PATH
+    #this should probably only be defined at the analysis level
+    #There is no way the user will know which Runnables use bin_dir
+    #Best thing to do is to probably expect this to be set in the environment
+    #and set this to undef here by default, so this can be used explicitly to 
+    #run with a custom bin_dir environment
+    
+    
     pdb_port             => undef,
     #no_write             => undef, #For use with runWorker.pl -no_write, so we can write some STDOUT in run
     
@@ -167,7 +183,7 @@ sub default_options {
 	#for each job
 	work_root_dir     => $self->o('data_root_dir').'/output/'.$self->o('pipeline_name'),
 	hive_output_dir   => $self->o('data_root_dir').'/output/'.$self->o('pipeline_name').'/hive_debug',
-    alt_data_root_dir => undef,
+  alt_data_root_dir => undef,
 
     #data_root_dir is omited, so it is made mandatory when loading the config
     #and we don't want to store a specific path in here
@@ -193,6 +209,17 @@ sub default_options {
     #How is password not throwing and error as we don't have ENSADMIN_PSW set in the env?
 
     verbose => undef,
+    #no_tidy => undef, #todo implement no_tidy
+    #Set this to stop the pipeline removing intermediates
+    #which maybe required for rerunning certain jobs
+    #leaving this unset greatly reduces the running footprint of the pipeline
+    #This is useful for debugging
+    
+    archive_root     => undef,
+    allow_no_archive => 0,
+    #Set this to 1 to allow analyses to skip
+    #archiving if archive_root is not specified
+    
    };
 }
 
@@ -205,46 +232,37 @@ sub default_options {
 
 
 sub resource_classes {
-  my ($self) = @_;
+  my $self = shift;
   return 
-    {
-      
-      #todo add in lsf group spec here to top LSF warning output
-      #todo pass DB_HOST_LSFNAME as param
-      
-     #Use this section when running on Sanger Farm2
-  #   default                 => { 'LSF' => '' },    
-  #   urgent                  => { 'LSF' => '-q yesterday' },
-  #   normal_monitored        => { 'LSF' => " -R\"select[$ENV{DB_HOST_LSFNAME}<1000] ".
-  #                                          "rusage[$ENV{DB_HOST_LSFNAME}=10:duration=10:decay=1]\"" },
-  #   normal_high_mem         => { 'LSF' => ' -M5000000 -R"select[mem>5000] rusage[mem=5000]"' },
-  #   long_monitored          => { 'LSF' => "-q long -R\"select[$ENV{DB_HOST_LSFNAME}<1000] ".
-  #                                          "rusage[$ENV{DB_HOST_LSFNAME}=10:duration=10:decay=1]\"" },
-  #   long_high_mem           => { 'LSF' => '-q long -M4000000 -R"select[mem>4000] rusage[mem=4000]"' },
-  #   long_monitored_high_mem => { 'LSF' => "-q long -M4000000 -R\"select[$ENV{DB_HOST_LSFNAME}<1000 && mem>4000]".
-  #                                              " rusage[$ENV{DB_HOST_LSFNAME}=10:duration=10:decay=1,mem=4000]\"" },
-
-  
-     #Use this section when running on Sanger Farm3
+    {#todo add in lsf group spec here to top LSF warning output
+     #todo pass DB_HOST_LSFNAME as param
+     
      default                 => { 'LSF' => '' },    
-     urgent                  => { 'LSF' => '-q yesterday' },
+     #urgent                  => { 'LSF' => '-q yesterday' },
+     #Should never use this in the pipleine, best to bswitch after submission if required
      normal_2GB              => { 'LSF' => ' -M2000 -R"select[mem>2000] rusage[mem=2000]"' },
      normal_monitored        => { 'LSF' => " -R\"select[$ENV{DB_HOST_LSFNAME}<1000] ".
                                             "rusage[$ENV{DB_HOST_LSFNAME}=10:duration=10:decay=1]\"" },
      normal_high_mem         => { 'LSF' => ' -M5000 -R"select[mem>5000] rusage[mem=5000]"' },
+     normal_high_mem_2cpu    => { 'LSF' => ' -n2 -M5000 -R"select[mem>5000] rusage[mem=5000] span[hosts=1]"' },
+     normal_monitored_2GB    => {'LSF' => " -M2000 -R\"select[$ENV{DB_HOST_LSFNAME}<1000 && mem>2000]".
+                                                " rusage[$ENV{DB_HOST_LSFNAME}=10:duration=10:decay=1,mem=2000]\"" },
+     normal_monitored_4GB    => {'LSF' => " -M4000 -R\"select[$ENV{DB_HOST_LSFNAME}<1000 && mem>4000]".
+                                            " rusage[$ENV{DB_HOST_LSFNAME}=10:duration=10:decay=1,mem=4000]\"" },  
+     normal_monitored_8GB    => {'LSF' => " -M8000 -R\"select[$ENV{DB_HOST_LSFNAME}<1000 && mem>8000]".
+                                            " rusage[$ENV{DB_HOST_LSFNAME}=10:duration=10:decay=1,mem=8000]\"" },   
+     normal_monitored_16GB    => {'LSF' => " -M16000 -R\"select[$ENV{DB_HOST_LSFNAME}<1000 && mem>16000]".
+                                            " rusage[$ENV{DB_HOST_LSFNAME}=10:duration=10:decay=1,mem=16000]\"" },    
+     normal_10gb_monitored    => {'LSF' => " -M10000 -R\"select[$ENV{DB_HOST_LSFNAME}<1000 && mem>10000]".
+                                            " rusage[$ENV{DB_HOST_LSFNAME}=10:duration=10:decay=1,mem=10000]\"" },                                                                         
+     normal_5GB_2cpu_monitored => {'LSF' => " -n2 -M5000 -R\"select[$ENV{DB_HOST_LSFNAME}<1000 && mem>5000]".
+                                                " rusage[$ENV{DB_HOST_LSFNAME}=10:duration=10:decay=1,mem=5000] span[hosts=1]\"" },
+     normal_10gb             => { 'LSF' => ' -M10000 -R"select[mem>10000] rusage[mem=10000]"' },
      long_monitored          => { 'LSF' => "-q long -R\"select[$ENV{DB_HOST_LSFNAME}<1000] ".
                                             "rusage[$ENV{DB_HOST_LSFNAME}=10:duration=10:decay=1]\"" },
      long_high_mem           => { 'LSF' => '-q long -M4000 -R"select[mem>4000] rusage[mem=4000]"' },
      long_monitored_high_mem => { 'LSF' => "-q long -M4000 -R\"select[$ENV{DB_HOST_LSFNAME}<1000 && mem>4000]".
                                                 " rusage[$ENV{DB_HOST_LSFNAME}=10:duration=10:decay=1,mem=4000]\"" },
-
-    
-
-
-     #Use this section when running on EBI cluster???
-     #    0 => { -desc => 'default',          'LSF' => '' },
-     #    1 => { -desc => 'long_high_mem',      'LSF' => '-M5000 -R"select[mem>5000] rusage[mem=5000]"' },
-     #    2 => { -desc => 'normal_high_memory',    'LSF' => '-M5000 -R"select[mem>5000] rusage[mem=5000]"' },
     };
 }
 
@@ -275,6 +293,7 @@ sub pipeline_wide_parameters {
     pipeline_name => $self->o('pipeline_name'),
     
     
+    
     #Will need to catch as mandatory params in fetch input where required
     species        => $self->o('species'),
     default_gender => 'male', #Used for defining reference files when gender is unkown
@@ -296,7 +315,13 @@ sub pipeline_wide_parameters {
     #No default for data dir, as we don't want to check in internal paths
     data_root_dir     => $self->o('data_root_dir'), #'/lustre/scratch109/ensembl/funcgen',
     work_root_dir     => $self->o('work_root_dir'), #'/lustre/scratch109/ensembl/funcgen',
-    alt_data_root_dir => $self->o('alt_data_root_dir'),    
+    alt_data_root_dir => $self->o('alt_data_root_dir'), 
+    
+    
+    archive_root     => $self->o('archive_root'),
+    allow_no_archive => $self->o('allow_no_archive'),
+    
+       
     bin_dir           => $self->o('bin_dir'),
   
     #root_output_dir => $self->o('root_output_dir'),
@@ -338,7 +363,17 @@ sub pipeline_wide_parameters {
                                  #is this already available in the job, or is it just passed ot the worker?
                     ],
     
-      
+    #This should really only ever be defined
+    #when running in debug mode, but here for clarity.
+    #This will not be passed as a param, so would either need to reseed the job
+    #or pass no_tidy as the debug level
+    #we could translate that to a real debug level via a hash in Base
+    #not_tidy, no_tidy_2, no_tidy_3
+    #This would work really nicely, but the hive code currently barfs as it expects a number
+    #Will have to reseed job instead!
+    #Currently only implemented in:
+    #MergeQCAlignements - to maintain fastq and bam chunk files
+    #no_tidy => $self->o('no_tidy'),  
   };
 }
 
@@ -363,6 +398,12 @@ sub pipeline_wide_parameters {
 #CR consider adding hive tables to output DB, therefore associating pipeline data with output data
 #Need to consider overwriting/cleaning existing hive tables
 #This will remove the possibility of having two hives run on the same DB. Is this a good thing?
+
+## WARNING!!
+## Currently init_pipeline.pl doesn't run this method when a pipeline is created with the -analysis_topup option
+# configure_hive.pl handles this
+
+
 
 1;
 

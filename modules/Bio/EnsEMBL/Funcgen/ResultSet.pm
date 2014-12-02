@@ -40,8 +40,8 @@ my $result_set = Bio::EnsEMBL::Funcgen::ResultSet->new
   (
    -dbid        => $dbid,
    -analysis    => $analysis,
-   -table_name  => 'input_set',
-   -table_id    => $input_set_id,
+   -table_name  => 'input_subset',
+   -table_id    => $input_subset_id,
    -feature_class => 'dna_methylation',
   );
 
@@ -64,6 +64,7 @@ package Bio::EnsEMBL::Funcgen::ResultSet;
 
 use strict;
 use warnings;
+use Bio::EnsEMBL::Utils::Scalar    qw( assert_ref check_ref );
 use Bio::EnsEMBL::Utils::Argument  qw( rearrange );
 use Bio::EnsEMBL::Utils::Exception qw( throw deprecate );
 
@@ -74,7 +75,6 @@ use base qw( Bio::EnsEMBL::Funcgen::Set Bio::EnsEMBL::Funcgen::feature_class_Set
 my %valid_table_names =
   (
    experimental_chip => undef,
-   input_set         => undef,
    input_subset     => undef,
    channel           => undef,
   );
@@ -108,53 +108,53 @@ sub new {
   my $caller = shift;
   my $class = ref($caller) || $caller;
   my $self = $class->SUPER::new(@_);
-  
+
   my ($table_name, $table_id, $rf_set, $dbfile_data_dir, $support, $rep)
-    = rearrange(['TABLE_NAME', 'TABLE_ID', 'RESULT_FEATURE_SET', 
+    = rearrange(['TABLE_NAME', 'TABLE_ID', 'RESULT_FEATURE_SET',
                  'DBFILE_DATA_DIR', 'SUPPORT', 'REPLICATE'], @_);
   # TEST MANDATORY PARAMS
 
   #explicit type check here to avoid invalid types being imported as NULL
   #and subsequently throwing errors on retrieval
   $self->_validate_feature_class(\@_);
-  
+
   #set default type until this is moved to db_file_registry.format
   #This is not possible yet as 5mC is classed as DNA not DNA Modification!!!
-  
+
   $self->{replicate}      = $rep;
   $self->{table_ids}      = {};
 
 
-  #Need to maintain -table_name and _add_table_id for lazy loading ability 
+  #Need to maintain -table_name and _add_table_id for lazy loading ability
   if(defined $table_name){
      if (! (defined $table_name &&
            exists $valid_table_names{$table_name}) ){
        throw('You need to pass a valid -table_name e.g. '.
             join(', ', keys %valid_table_names));
     }
-   
-    $self->{table_name}         = $table_name;    
+
+    $self->{table_name}         = $table_name;
   }
-  #else defined based on support? 
-    
-  #This will currently allow a ResultSet with no support/table_ids   
-  if(defined $support){ 
-    $self->add_support($support);     
+  #else defined based on support?
+
+  #This will currently allow a ResultSet with no support/table_ids
+  if(defined $support){
+    $self->add_support($support);
   }
   elsif(! defined $table_name){
-    throw('You must provide either a -support or a -table_name parameter');    
+    throw('You must provide either a -support or a -table_name parameter');
   }
-  
+
   #Remove this when -table_id fully deprecated
   if(defined $table_id){
     deprecate('The -table_id param is now deprecated in new. Please use -support');
     $self->_add_table_id($table_id) if defined $table_id;
-    
+
     if(defined $support){
       throw('Unsafe to specify -support and -table_id, please use -support');
     }
   }
-  
+
 
   $self->{result_feature_set} = (defined $rf_set) ? 1 : 0;
   $self->dbfile_data_dir($dbfile_data_dir) if defined $dbfile_data_dir;
@@ -176,8 +176,8 @@ sub _valid_feature_classes{
             -cell_type    => Bio::EnsEMBL::Funcgen::CellType,
             -support      => Arrayref of valid support objectse.g. InputSet
 
-  Description: Resets all the relational attributes of a given ResultSet. 
-               Useful when creating a cloned object for migration beween DBs 
+  Description: Resets all the relational attributes of a given ResultSet.
+               Useful when creating a cloned object for migration beween DBs
   Returntype : None
   Exceptions : Throws if any of the parameters are not defined or invalid.
   Caller     : Migration code
@@ -187,50 +187,51 @@ sub _valid_feature_classes{
 
 sub reset_relational_attributes{
   my ($self, $params_hash, $no_db_reset) = @_;
-  my ($support, $analysis, $feature_type, $cell_type) =
-    rearrange(['SUPPORT', 'ANALYSIS', 'FEATURE_TYPE', 'CELL_TYPE'], 
-    %$params_hash);
-  
+  my ($support, $analysis, $feature_type, $cell_type, $exp) =
+    rearrange(['SUPPORT', 'ANALYSIS', 'FEATURE_TYPE', 'CELL_TYPE', 'EXPERIMENT'], %$params_hash);
+
   #flush table ID cache and add support
-  $self->{table_ids} = undef;  
+  $self->{table_ids} = undef;
   $self->{support}   = undef;
   $self->add_support($support);
-  
+
   #is_stored (in corresponding db) checks will be done in store method
- 
-  if(! (defined $analysis &&
-        ref($analysis) eq 'Bio::EnsEMBL::Analysis') ){
-    throw('You must pass a valid Bio::EnsEMBL::Analysis');
+
+  assert_ref($analysis,     'Bio::EnsEMBL::Analysis');
+  assert_ref($feature_type, 'Bio::EnsEMBL::Funcgen::FeatureType');
+  assert_ref($cell_type,    'Bio::EnsEMBL::Funcgen::CellType');
+
+  if( $self->experiment &&
+      ! check_ref($exp, 'Bio::EnsEMBL::Funcgen::Experiment') ){
+    throw("You must pass a valid Bio::EnsEMBL::Funcgen::Experiment\n".
+          "Passed:\t".ref($exp));
   }
-  
-  if(! (defined $feature_type &&
-        ref($feature_type) eq 'Bio::EnsEMBL::Funcgen::FeatureType') ){
-    throw('You must pass a valid Bio::EnsEMBL::Funcgen::FeatureType');
+
+  if(defined $exp){
+    #This will allow addition of an experiment
+    #when it was not prevously defined
+    $self->{experiment_id} = $exp->dbID;
+    $self->{experiment}    = $exp;
   }
-  
-  
-  if(! (defined $cell_type &&
-        ref($cell_type) eq 'Bio::EnsEMBL::Funcgen::CellType') ){
-    throw('You must pass a valid Bio::EnsEMBL::Funcgen::CellType');
-  }
-  
+
+
   $self->{cell_type}    = $cell_type;
   $self->{feature_type} = $feature_type;
   $self->{analysis}     = $analysis;
-  
+
   #Finally undef the dbID and adaptor by default
   if(! $no_db_reset){
     $self->{adaptor} = undef;
     $self->{dbID}    = undef;
   }
-  
+
   return;
 }
 
 
 =head2 replicate
 
-  Description: Accessor for replicate attribute 
+  Description: Accessor for replicate attribute
   Returntype : Int
   Exceptions : None
   Caller     : Genereal
@@ -239,7 +240,7 @@ sub reset_relational_attributes{
 =cut
 
 sub replicate{
-  return shift->{replicate};  
+  return shift->{replicate};
 }
 
 sub add_support{
@@ -249,28 +250,28 @@ sub add_support{
         (ref($support) eq 'ARRAY')) ){
     throw('You must pass an Arrayref of support objects');
   }
-  
+
   #Check passed table name matches objects
   #remove this once we remove add_table_ids
   #although we still need to check all support object are the same
-  my $tmp_table_name = $self->table_name; 
-  my $sdba = $support->[0]->adaptor;  
-  (my $class_name = ref($support->[0])) =~ s/.*://g; 
-  
+  my $tmp_table_name = $self->table_name;
+  my $sdba = $support->[0]->adaptor;
+  (my $class_name = ref($support->[0])) =~ s/.*://g;
+
   if(! $sdba){
     throw("No $class_name adaptor found. All ResultSet -support must be stored");
   }
 
-  my $table_name = $sdba->_main_table->[0];    
+  my $table_name = $sdba->_main_table->[0];
 
   if(defined $tmp_table_name &&
     ( $tmp_table_name ne $table_name) ){
      throw('Specified -table_name does not match -support table name. '.
-          'Please omit -table_name and ensure all -support objects are of the same class'); 
+          'Please omit -table_name and ensure all -support objects are of the same class');
   }
   elsif(! defined $tmp_table_name){
-    $self->{table_name} = $table_name;  
-  
+    $self->{table_name} = $table_name;
+
     #Validate table name
     if(! exists $valid_table_names{$table_name}){
       throw("The -table_name or -support objects do not refer to a valid".
@@ -278,97 +279,41 @@ sub add_support{
             join(', ', keys %valid_table_names));
     }
   }
-  
+
   #todo validate $ssets have same cell_type and feature_type
-  
-  #Add the table_ids and set the support 
+
+  #Add the table_ids and set the support
   foreach my $sset(@$support){
-  
-    if (! ( defined $sset && 
-            ref($sset) && 
+
+    if (! ( defined $sset &&
+            ref($sset) &&
             $sset->isa('Bio::EnsEMBL::Funcgen::'.$class_name)) ){
          throw(ref($sset)." is not a valid support type for this $class_name ResultSet\n");
     }
-    
+
     #we don't have access to is_stored_and_valid here
-    #so this may throw an error   
-    
-    #if the table id is already defined, it has either been set by 
+    #so this may throw an error
+
+    #if the table id is already defined, it has either been set by
     #obj_from_sth or add_support
     #For both these cases we want to throw from here
-                
+
     if(exists $self->{table_ids}->{$sset->dbID}){
       throw('Cannot add_support for previously added/stored ResultSet support: '.
-        ref($sset).'('.$sset->dbID.')');  
+        ref($sset).'('.$sset->dbID.')');
     }
-       
-    $self->_add_table_id($sset->dbID);  
+
+    $self->_add_table_id($sset->dbID);
   }
-  
+
 
   $self->{support} ||= [];
-  push @{$self->{support}}, @$support;  
-  
+  push @{$self->{support}}, @$support;
+
   return $self->{support};
 }
 
 
-=head2 experimental_group
-
-  Example    : my $rset_exp_group = $rset->experimental_group;
-  Description: Convenience method to get the unique experimental group name
-               for this ResutlSet. Only works for ResultSets supported by InputSets.
-  Returntype : String or undef (if no unique name found).
-  Exceptions : None
-  Caller     : General
-  Status     : At Risk
-
-=cut
-
-#Need a better way for handling source refs/track info for tracks which can share the same analysis
-#Is this the analysis description right place to be putting source refs?
-#Yes if we are only ever going to have one source/signal track
-#ChIP-Seq ResultFeature tracks have merged sources and only have source refs corresponding peak zmenus
-#This will also appear in the track info and config
-
-sub experimental_group{
-  my $self = shift;
-
-  if(! exists $self->{experimental_group}){
-    #Not undef check as undef is a valid value
-    #for mixed project ResultSets
-  
-    if($self->table_name !~ /^input_(sub)?set$/o){
-      throw('Cannot currently get ExperimentalGroup for a ResultSet with non-InputSet/InputSubset support'); 
-    }
-
-    my $exp_group;
-    my @sets = @{$self->get_support};
-
-    if(@sets){
-   
-      foreach my $set(@sets){
-
-        if($set->can('is_control') && $set->is_control){
-          #ignore controls as they can come from other groups
-          next;  
-        }
-        
-        $exp_group ||= $set->get_Experiment->get_ExperimentalGroup->name;  
-        
-        if($exp_group ne $set->get_Experiment->get_ExperimentalGroup->name){
-          #Mixed experimental_group ResultSet
-          $exp_group = undef;
-          last;
-        }
-      }
-    }
-
-    $self->{experimental_group} = $exp_group;
-  }
-
-  return $self->{experimental_group};
-}
 
 
 =head2 display_label
@@ -486,7 +431,7 @@ sub result_feature_set{ return $_[0]->{result_feature_set}; }
 
 =head2 table_name
 
-  Example    : if($result_set->table_name eq 'input_set'){
+  Example    : if($result_set->table_name eq 'input_subset'){
                  #Do something here
                }
   Description: Getter for the table_name of a ResultSet.
@@ -524,12 +469,12 @@ sub _add_table_id {
   }else{
 
     #This allows setting of the cc_id on store
-    if((exists $self->{'table_ids'}->{$table_id}) && 
+    if((exists $self->{'table_ids'}->{$table_id}) &&
        (defined $self->{'table_ids'}->{$table_id})){
       throw("You are attempting to redefine a result_set_input_id which is already defined");
     }
-  
-    $self->{'table_ids'}->{$table_id} = $cc_id;    
+
+    $self->{'table_ids'}->{$table_id} = $cc_id;
   }
 
   return;
@@ -592,7 +537,7 @@ sub contains{
 
 =head2 get_result_set_input_id
 
-  Arg [1]    : int - dbID (experimental_chip, channel or input_set)
+  Arg [1]    : int - dbID (experimental_chip, channel or input_subset)
   Example    : $result_set->get_result_set_input_id($ec_id);
   Description: Retrieves a result_set_input_id from the cache given a dbID
   Returntype : int
@@ -620,22 +565,22 @@ sub get_result_set_input_id{
 =cut
 
 sub get_support {
-  my $self = $_[0];
-  
+  my $self = shift;
+
   if(! defined $self->{support}){
     my $adaptor_method = 'get_'.
                          join('',  (map ucfirst($_), split(/_/, $self->table_name))). #export from EFGUtils?
-                         'Adaptor'; 
-                          
+                         'Adaptor';
+
     #Adaptor may be absent if we have an unstored object and not used -support in new
-    #This will disappear once -table_id and -table_name are removed from new               
-    my $supp_adaptor = $self->adaptor->db->$adaptor_method;  
-  
+    #This will disappear once -table_id and -table_name are removed from new
+    my $supp_adaptor = $self->adaptor->db->$adaptor_method;
+
     foreach my $id(@{$self->table_ids()}){
       push @{$self->{support}}, $supp_adaptor->fetch_by_dbID($id);
-    }   
+    }
   }
-    
+
   return $self->{support};
 }
 
@@ -665,21 +610,21 @@ sub get_ExperimentalChips{
   elsif($self->table_name eq 'experimental_chip'){
     $echips = $self->get_support;
   }
-  else{  #table_name is channel 
-    
+  else{  #table_name is channel
+
     if(! defined $self->{experimental_chips}){
       my %echips;
       my $chan_adaptor = $self->adaptor->db->get_ChannelAdaptor;
       my $ec_adaptor   = $self->adaptor->db->get_ExperimentalChipAdaptor;
-  
+
       foreach my $chan_id( @{$self->table_ids} ){
         my $chan = $chan_adaptor->fetch_by_dbID($chan_id);
         $echips{$chan->experimental_chip_id} ||= $ec_adaptor->fetch_by_dbID($chan->experimental_chip_id);
       }
-      
+
       @{$self->{'experimental_chips'}} = values %echips;
     }
-    
+
     $echips = $self->{'experimental_chips'};
   }
 
@@ -707,22 +652,13 @@ sub get_replicate_set_by_result_set_input_id{
 
   if( ! defined $self->{'_replicate_cache'}){
 
-	warn "Generating replicate cache!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!";
-
-
-	foreach my $ec (@{$self->get_ExperimentalChips()}){
-
-	  $self->{'_replicate_cache'}{$self->get_result_set_input_id($ec->dbID())} = $ec->replicate();
-
-
-	}
+    foreach my $ec (@{$self->get_ExperimentalChips()}){
+      $self->{'_replicate_cache'}{$self->get_result_set_input_id($ec->dbID())} = $ec->replicate();
+    }
   }
 
-
   #warn here of absent replicate info?
-
   return (exists $self->{'_replicate_cache'}{$cc_id}) ?  $self->{'_replicate_cache'}{$cc_id} : undef;
-
 }
 
 sub get_replicate_set_by_chip_channel_id{
@@ -827,21 +763,21 @@ sub log_label {
 
   Args[1]    : Bio::EnsEMBL::Funcgen::Storable (mandatory)
   Args[2]    : Boolean - Optional 'shallow' - no object methods compared
-  Args[3]    : Arrayref - Optional list of ResultSet method names each 
+  Args[3]    : Arrayref - Optional list of ResultSet method names each
                returning a Scalar or an Array or Arrayref of Scalars.
                Defaults to: name table_name feature_class get_all_states
-  Args[4]    : Arrayref - Optional list of ResultSet method names each 
+  Args[4]    : Arrayref - Optional list of ResultSet method names each
                returning a Storable or an Array or Arrayref of Storables.
                Defaults to: feature_type cell_type analysis get_support
   Example    : my %shallow_diffs = %{$rset->compare_to($other_rset, 1)};
-  Description: Compare this ResultSet to another based on the defined scalar 
+  Description: Compare this ResultSet to another based on the defined scalar
                and storable methods.
   Returntype : Hashref of key attribute/method name keys and values which differ.
                Keys will always be the method which has been compared.
-               Values can either be a error string, a hashref of diffs from a 
+               Values can either be a error string, a hashref of diffs from a
                nested object, or an arrayref of error strings or hashrefs where
-               a particular method returns more than one object.  
-  Exceptions : None 
+               a particular method returns more than one object.
+  Exceptions : None
   Caller     : Import/migration pipeline
   Status     : At Risk
 
@@ -849,57 +785,79 @@ sub log_label {
 
 sub compare_to {
   my ($self, $obj, $shallow, $scl_methods, $obj_methods) = @_;
-      
+
   $obj_methods ||= [qw(feature_type cell_type analysis get_support)];
   $scl_methods ||= [qw(name table_name feature_class get_all_states)];
 
-  return $self->SUPER::compare_to($obj, $shallow, $scl_methods, 
+  return $self->SUPER::compare_to($obj, $shallow, $scl_methods,
                                   $obj_methods);
 }
 
 
-=head2 get_Experiment
+=head2 experiment
 
-  Example    : my $exp = $result_set->get_Experiment();
+  Arg[1]     : Boolean - Control flag, get's control experiment instead of signal experiment
+  Example    : my $exp = $result_set->experiment;
   Description: Getter for the Experiment of this ResultSet.
                Returns undef if there is more than 1 contributing Experiment
   Returntype : Bio::EnsEMBL::Funcgen::Experiment or undef
-  Exceptions : None
+  Exceptions : Warns if cannot identify unique Experiment
   Caller     : General
   Status     : At Risk
 
 =cut
 
-sub get_Experiment{ 
-  my $self = shift;
-  
-  if (! exists $self->{experiment}){ #exists as undef is valid
-    my @supporting_sets = $self->get_support;
-    
-    #These are likely InputSubsets, but may still be InputSets
-    
-    my $exp;
-    
-    foreach my $set(@supporting_sets){
-    
-      if($set->can('is_control') && $set->is_control){
-        next;
-      }
-    
-      $exp ||= $set->get_Experiment;
-      
-      if($set->get_Experiment->dbID != $exp->dbID){
-        undef $exp;
-        last;        
+#experiment_id is not mandatory, so we can still get this from the support
+#probably best to make it mandatory in the near future, although this won't support control
+#use it if it is there, else use rsi's
+
+
+sub experiment{
+  my $self    = shift;
+  my $control = shift;
+  my $attr_name = 'experiment';
+  $attr_name    = 'control_'.$attr_name if $control;
+
+  my $exp;
+  if (! exists $self->{$attr_name}){ #exists as undef is valid
+
+    if((! $control) &&
+      $self->experiment_id){
+      $exp = $self->adaptor->db->get_ExperimentAdaptor->fetch_by_dbID($self->experiment_id);
+    }
+    else{
+      #These are likely InputSubsets, but could be others e.g. InputSets, ExperimentalChips etc
+      my @support = @{$self->get_support};
+
+      foreach my $support(@support){
+
+        if($support->can('is_control')){
+
+          if(($support->is_control && ! $control) ||
+             ($control && ! $support->is_control)){
+            next;
+          }
+        }
+        elsif($control){
+          throw("Cannot get control Experiment for ResultSet with support type:\t".ref($support));
+        }
+
+        $exp ||= $support->experiment;
+
+        if($support->experiment->dbID != $exp->dbID){
+          undef $exp;
+          warn('Failed to get unique Experiment for ResultSet '.$self->name."\n");
+          last;
+        }
       }
     }
-    
-    $self->{experiment} = $exp;
+
+    $self->{$attr_name} = $exp;
   }
-  
-  return $self->{experiment};
+
+  return $self->{$attr_name};
 }
-  
+
 ### DEPRECATED ###
 
 sub get_InputSets{ #DEPRECATED IN v72
@@ -912,5 +870,13 @@ sub add_table_id { #DEPRECATED IN v72
    deprecate('The add_table_id method is now deprecated, please use the -support param in new');
    return $_[0]->_add_table_id($_[1]);
 }
+
+
+#an attempt to try and standardise the Set interface/role
+sub get_Experiment{ #DEPRECATED in v76
+  deprecate('The get_Experiment method is now deprecated, please use the experiment method instead');
+  return shift->experiment;
+}
+
 
 1;

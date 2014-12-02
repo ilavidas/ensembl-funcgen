@@ -73,13 +73,13 @@ use base qw( Bio::EnsEMBL::Funcgen::Storable );
   Arg [-DESCRIPTION]         : String
 
   Example    : my $array = Bio::EnsEMBL::Funcgen::Experiment->new
-                              (
-							   -NAME                => $name,
+                (-NAME                => $name,
 							   -EXPERIMENTAL_GROUP  => $group,
 							   -DATE                => $date,
 							   -PRIMARY_DESIGN_TYPE => $p_design_type,
 							   -DESCRIPTION         => $description,
-					          );
+					       -ARCHIVE_ID          => 'SRX000000',
+					       -DISPLAY_URL         => $non_archive_url);
 
   Description: Creates a new Bio::EnsEMBL::Funcgen::Experiment object.
   Returntype : Bio::EnsEMBL::Funcgen::Experiment
@@ -96,9 +96,10 @@ sub new {
 	my $self   = $class->SUPER::new(@_);
 
 	my ($name, $group, $date, $p_dtype, 
-	    $desc, $xml, $xml_id, $ftype, $ctype) = rearrange
+	    $desc, $xml, $xml_id, $ftype, $ctype, $archive_id, $url) = rearrange
 	 ( ['NAME', 'EXPERIMENTAL_GROUP', 'DATE', 'PRIMARY_DESIGN_TYPE',
-      'DESCRIPTION', 'MAGE_XML', 'MAGE_XML_ID', 'FEATURE_TYPE', 'CELL_TYPE'], @_ );
+      'DESCRIPTION', 'MAGE_XML', 'MAGE_XML_ID', 'FEATURE_TYPE', 'CELL_TYPE',
+      'ARCHIVE_ID', 'DISPLAY_URL'], @_ );
 
 	#Mandatory attr checks
 
@@ -127,6 +128,8 @@ sub new {
 	$self->{description}         = $desc       if defined $desc;
 	$self->{cell_type}           = $ctype;
   $self->{feature_type}        = $ftype;
+  $self->{archive_id}          = $archive_id;
+  $self->{display_url}         = $url;
 
 	#Maintain setter funcs here as these are populated after initialisation
 	$self->mage_xml_id($xml_id) if defined $xml_id;
@@ -516,6 +519,92 @@ sub compare_to {
   return $self->SUPER::compare_to($obj, $shallow, $scl_methods,
                                   $obj_methods);
 }
+
+
+=head2 archive_id
+
+  Example     : my $archive_id = $exp->archive;
+  Description : Getter for the archive_id
+  Returntype  : String
+  Exceptions  : None
+  Caller      : General
+  Status      : At risk
+
+=cut
+
+sub archive_id { return shift->{archive_id};  }
+
+
+=head2 display_url
+
+  Example     : my $url = $exp->display_url;
+  Description : Getter for the display url
+  Returntype  : String
+  Exceptions  : None
+  Caller      : General
+  Status      : At risk
+
+=cut
+
+sub display_url{ return shift->{display_url}; }
+
+
+
+=head2 source_info
+
+  Example    : my $source_info = $exp->source_info;
+  Description: Getter for the experiment source info i.e. [[ $label, $url ]]
+  Returntype : Arrayref
+  Exceptions : None
+  Caller     : General
+  Status     : At risk
+
+=cut
+
+sub source_info{
+  my $self = shift;
+
+  if(! defined $self->{source_info}){
+    #could have data_url as highest priority here
+    #but we need to ensure removal when adding archive ids
+    #so we link to the archive and not the old data url
+
+    my $exp_group = $self->experimental_group;
+    my @source_info; 
+    my ($proj_name, $proj_link);
+
+    if($exp_group->is_project){
+      $proj_name = $exp_group->name;
+      $proj_link = $exp_group->url;
+    }
+
+
+    if(defined $self->archive_id ){
+      #Need to handled comma separated values in here
+      
+      foreach my $archive_id(split/,/, $self->archive_id){
+      
+        push @source_info, [$archive_id, $self->display_url];
+        #source_link can be undef here as archive_id overrides display url
+        #undef links will automatically go to the SRA
+        #If multiple IDs exists, they will all use the same display_url
+      }
+    }
+    elsif(defined $proj_name){
+      push @source_info, [$proj_name, ($self->display_url || $proj_link)];
+    }
+ 
+    $self->{source_info} = \@source_info;
+  }
+
+  return $self->{source_info};
+}
+
+
+
+
+
+
 
 1;
 

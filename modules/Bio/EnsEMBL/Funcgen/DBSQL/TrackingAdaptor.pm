@@ -58,23 +58,31 @@ package Bio::EnsEMBL::Funcgen::DBSQL::TrackingAdaptor;
 
 use strict;
 use warnings;
+use feature qw(say);
+
 use DateTime;
 #use POSIX                                  qw( strftime );
 use Bio::EnsEMBL::Utils::Exception         qw( throw warning );
-use Bio::EnsEMBL::Utils::Scalar            qw( check_ref );
+use Bio::EnsEMBL::Utils::Scalar            qw( check_ref assert_ref );
 use Bio::EnsEMBL::Funcgen::DBSQL::DBAdaptor;
-use Bio::EnsEMBL::Funcgen::Utils::EFGUtils qw( get_month_number );
+use Bio::EnsEMBL::Funcgen::Utils::EFGUtils qw( get_month_number split_CamelCase);
 
 use base qw( Bio::EnsEMBL::DBSQL::BaseAdaptor );
-
 #Currently don't use and Funcgen BaseAdaptor methods in here
 #and this would require _true_tables to be defined
 
-
-#Empty true tables method as required by funcgen BaseAdpator::new
-#sub _true_tables{
-#  return;  
-#}
+#values are mandatory booleans
+my %tracking_columns = 
+ (input_subset => {availability_date => 1,
+                   download_url      => 1,
+                   download_date     => 0,
+                   local_url         => 0,
+                   md5sum            => 0,
+                   notes             => 0},
+  result_set   => {idr_max_peaks        => 0,
+                   idr_peak_analysis_id => 0},
+ );
+                        
 
 =head2 new
 
@@ -184,120 +192,169 @@ sub repository_path{
 #we are still having to contend with merged input_subsets here
 #we really need to fix this?
 
-sub fetch_InputSubset_tracking_info{
-  my ($self, $set, $force_download, $date, $skip_beds) = @_;
+sub _columns{
+  my $self       = shift;
+  #unlikely table_name will be 0
+  my $table_name = shift || throw('Must defined a table_name argument');
+   
+  if(! defined $table_name){
+    throw('Must defined a table_name argument');  
+  }  
+  
+  return keys %{$tracking_columns{$table_name}};  
+}
 
-  #can remove this when we update download_inputset_data.pl
-  if($force_download || $date || $skip_beds){
-    throw('fetch_InputSubset_tracking_info no longer supports thte force_dowload, date or skips_beds arguments');  
-  }
+sub _mandatory_columns{
+  my $self       = shift;
+  #unlikely table_name will be 0
+  my $table_name = shift || throw('Must defined a table_name argument');
+   
+  if(! defined $table_name){
+    throw('Must defined a table_name argument');  
+  }  
+  
+  #force list context so we don't just get the number of matches
+  return (grep { $tracking_columns{$_} } keys %tracking_columns);
+}
 
-  my @sub_sets;
-  my $db = $self->db;
-
-  if(! $set){
-	  throw('You need to pass a valid stored InputSet or InputSubset');
-  }
-  elsif(check_ref($set, 'Bio::EnsEMBL::Funcgen::InputSet')){
+sub _is_mandatory_column{
+  my $self       = shift;
+  #unlikely table_name or col will be 0
+  my $table_name = shift || throw('Must defined a table_name argument');
+  my $col        = shift || throw('Must defined a columns argument');
     
-    if($set->is_stored($db)){
-  	  push @sub_sets, @{$set->get_InputSubsets};
-    }
-    else{
-      throw("InputSet is not stored in this DB:\t".$set->name);  
-    }
+  if(! exists $tracking_columns{$table_name}{$col}){
+    throw($col." is not a valid column, must be one of:\t".join(' ', $self->_columns($table_name)));  
   }
-  elsif(check_ref($set, 'Bio::EnsEMBL::Funcgen::InputSubset')){
+  
+  return $tracking_columns{$table_name}{$col};
+}
+
+
+sub _is_column{
+  my $self       = shift;
+  #unlikely table_name or col will be 0
+  my $table_name = shift || throw('Must defined a table_name argument');
+  my $col        = shift || throw('Must defined a columns argument');
     
-	  if($set->is_stored($db)){
-	    push @sub_sets, $set;
+  return exists $tracking_columns{$table_name}{$col};  
+}
+
+
+#optionally add in class specific subs like is_embargoed and set_dowload_status?
+#As these methods are not simple getter/setters it maybe cleaner not to inject them
+#But this leaves some methods available via the object, and some by the adaptor only :/
+#This is a case to have separate class specific _inject methods, which call the generic
+#_inject methods(for the getter/setters), then inject the additionally inject the
+#class specific ones
+#One downside to this is error handling, where line numbers will reference anonymous subroutines
+#and not the true line number in this module. This is likely fine for the getter/setters, but might
+#be problemtic with more complicated methods.
+
+sub _inject_tracking_methods{
+  my $self       = shift;
+  my $storable   = shift || throw('Must pass a Storable argument');
+  my $table_name = $self->get_valid_stored_table_name($storable);   
+    
+  #We don't need to test for existing methods in the namespace here(CvGV_name_or_bust)
+  #as we know exactly what methods are already present
+  my @cols = $self->_columns($table_name);
+  
+  if(! $storable->can($cols[0])){ 
+    my $ref = ref($storable);
+    no strict 'refs';
+  
+    for my $col(@cols){
+      *{$ref."::${col}"} = 
+        sub {
+          my $self = shift;
+          my $val  = undef;
+          
+          #to prevent auto vivification
+          #which may prevent fetch                   
+          if(exists $self->{tracking_info}){
+            $val = $self->{tracking_info}{$col};  
+          }
+          else{
+            $self->throw("Cannot get $col attribute as tracking_info has not be set yet.".
+            ' You need to call $tdb->fetch_tracking_info($storable) first.');  
+          }
+           
+          return $val; 
+        };
     }
-    else{
-      throw("InputSubset is not stored in this DB:\t".$set->name);    
-    }
+   
+    use strict;
+    #avoids being able to work with symbolic reference
+    #i.e. Your::Package::Name->$param_method
+    #rather than $obj->$param_method  
   }
-  else{
-    throw("Set argument is not an InputSubset:\t$set");  
-  }
-
-
-  my (%subset_cache, @tracking_info);
-
-  foreach my $sset(@sub_sets){
   
-    if(exists $sset->{tracking_info}){
-      push @tracking_info, @{$sset->{tracking_info}};
-    }
-    else{
-      $sset->{tracking_info} = [];
-      $subset_cache{$sset->dbID} = $sset;   
-    }
-  }
-  
-  if(keys %subset_cache){
-
-    my $sql = 'SELECT iss.input_subset_id, isst.replicate, isst.download_url, isst.downloaded,
-               isst.availability_date, isst.md5sum, isst.is_control, isst.not_pooled
-               FROM input_subset iss, input_subset_tracking isst
-               WHERE iss.input_subset_id=isst.input_subset_id 
-               AND iss.input_subset_id IN('.join(',', (keys %subset_cache)) .')';
-
-    #warn $sql;
-
-    #if ($date ne 'IGNORE'){
-	  #  $date ||= "NOW()";
-	  #  $sql .= " AND ( (isst.availability_date IS NULL) OR (isst.availability_date < '${date}')) ";
-    #}
-
-    #if(! $force_download){
-	  #  $sql .= ' AND isst.downloaded IS NULL';
-    #}
+  return;
+}
 
 
-    #if($skip_beds){
-	  #  $sql .= ' AND iss.name not like "%.bed%"';
-    #}
+#Todo 
+#Handle clashes between existing tracking_info attribute and fetched data
 
-    #warn $sql;
-  
-    #change this to return a hash with field key names
-  
+sub fetch_tracking_info{
+  my $self       = shift;
+  my $storable   = shift || throw('Must pass a Storable argument');
+  my $table_name = $self->get_valid_stored_table_name($storable);   
+  my $db         = $self->db;
+
+  $self->_inject_tracking_methods($storable);
+  my $hashref;
+
+  if(exists $storable->{tracking_info}){
+    throw("$table_name Storable(".$storable->dbID.
+      ") already has tracking_info attribute. Please store/update before fetching\n");  
+      
+      #This may over-write existing data
+  }else{
+
+    my $sql = 'SELECT '.join(', ', ($self->_columns($table_name))).
+              " FROM ${table_name}_tracking WHERE ${table_name}_id =".$storable->dbID;
     my $sth = $self->prepare($sql);
     $sth->execute;
-    my %column;
-    #pseudo array/hash? 
-    $sth->bind_columns( \( @column{ @{$sth->{NAME_lc} } } ));
+    $hashref = $sth->fetchrow_hashref; #Will this be undef if there is no data?
+    $storable->{tracking_info} = $hashref;
+    $sth->finish;#otherwise we get disconnect warnings
     
-    while( $sth->fetch ){
-      my $record = {%column}; #deref properly as %columns will be updated
-      push @tracking_info, {%$record}; #Keep the dbID here
-      #otherwise there will be now way to identify what the record refers to
-      my $dbID = delete($record->{input_subset_id}); #Don't need this
-      push @{$subset_cache{$dbID}->{tracking_info}}, $record;
-    }
+    #my %column;
+    #pseudo array/hash? 
+    #$sth->bind_columns( \( @column{ @{$sth->{NAME_lc} } } ));
+    #while( $sth->fetch ){
+    #  my $record = {%column}; #deref properly as %columns will be updated
+    #  push @tracking_info, {%$record}; #Keep the dbID here
+    #  #otherwise there will be now way to identify what the record refers to
+    #  my $dbID = delete($record->{input_subset_id}); #Don't need this
+    #  push @{$subset_cache{$dbID}->{tracking_info}}, $record;
+    #}
   }
   
-  #Currently never using $sUbset_cache?
-
-  #This is all messed up as this handles InputSet as well as InputSubsets
-  #and we want to cache the result and return the records?
-  #should restrict this to InputSubsets only
-  #where are the callers for this?
-  
-  #warn "returning tracking info @tracking_info";
-  
-  #use Data::Dumper qw(Dumper);
-  #warn "tracking_info ".Dumper(\@tracking_info);
-  
-  
-  return \@tracking_info;
+  return $hashref;
 }
+
+
+#TO DO
+#This should also set the local_url?
+#The is a question of validation of the tracking info before storing
+#in this case, if we have set the download date, then we should also set the local_url
+#is this a case to have a validate_input_subset_tracking_info method?
+#This is currently of very limited utility, and can probably be handled in the caller (for now)
+#Remove this in favour of store_tracking_info($storable, {allow_update =>1}) ?
+#Although the is extra logic here: to_null and potential local_url check?
+
+#This could be a wrapper to store_tracking_info. But we would need to get the stored data first
+#and selectively overwrite just the date (and local_url) and set purge, to ensure that the NULL date
+#is updated
 
 sub set_download_status_by_input_subset_id{
   my ($self, $iss_id, $to_null) = @_;
   
   my $date = ($to_null) ? 'NULL' : 'NOW()';
-  my $sql = "UPDATE input_subset_tracking SET downloaded=${date} WHERE input_subset_id=${iss_id};";
+  my $sql = "UPDATE input_subset_tracking SET download_date=${date} WHERE input_subset_id=${iss_id};";
   $self->db->dbc->do($sql);
 
   return;
@@ -305,26 +362,8 @@ sub set_download_status_by_input_subset_id{
 
 
 
-#These will both work for InputSets too as this is supported by 
-#fetch_InputSubset_tracking_info
-
-sub is_InputSubset_downloaded {
-  my ($self, $isset) = @_;
- 
-  my $downloaded = 1;
- 
-  foreach my $tr_info(@{$self->fetch_InputSubset_tracking_info($isset)}){
-    if(! defined $tr_info->{local_url}){
-      $downloaded = 0;  
-      last;
-    }
-  }
-  
-  return $downloaded;
-}
-
-
 #Careful this is american format for some reason!!!
+#Can we inject a version this for input_subsets?
 
 sub is_InputSubset_embargoed {
   my ($self, $isset, $yyyy_mm_dd) = @_;
@@ -366,34 +405,206 @@ sub is_InputSubset_embargoed {
     }
   }
   
-    
-  
   #InputSubsets can have more than one tracking record at the moment
   #as they are currently merged at the InputSubset level rather than the InputSet level
-  my $track_records = $self->fetch_InputSubset_tracking_info($isset);
-  
-  my @embargoed;
-  
-  #Need to change this as we don't have access to the dbID or the InputSubset name here
-  
-  foreach my $tr(@$track_records){
+  #What will happen here is we have other unstored tracking info
+  #It will still barf.
+  #we need to fix fetch_tracking_info to handle this, similar to how store does
+  #fetching without method ssets means we should preferentially take the new data
+  #what about NULLs? Should warn too
+  #If the methods are available, it means we have already fetched
+  #only if they are not available and tracking_info hash is present is it an issue
+  #This should suffice for now
+  $self->fetch_tracking_info($isset) if ! $isset->can('availability_date');
  
-    #strip off time
-    (my $avail_date = $tr->{availability_date}) =~ s/ .*//o;
-    my ($year, $month, $day) = split(/-/, $avail_date);
-   
-   
-    my $isset_date = DateTime->new(day   => $day,
-                                   month => $month,
-                                   year  => $year  );
-                                  
-                                  
-    if($isset_date > $rel_date){ #Nice operator overloading!
-      push @embargoed, $isset->name;
+  #This was causing issues as DateTime cannot take the default null date of 0000-00-00
+  my $avail_date = $isset->availability_date;
+ 
+  if($avail_date eq '0000-00-00'){
+    warn "Found $avail_date availability date for InputSubset:\t".$isset->name.
+      "\nDefaulting to 0001-01-01\n";
+    $avail_date = '0001-01-01';
+  }
+ 
+  my ($year, $month, $day) = split(/-/, $avail_date);
+  my $isset_date           = DateTime->new(day   => $day,
+                                           month => $month,
+                                           year  => $year  );                                                                
+  return ($isset_date > $rel_date) ? 1 : 0; #Nice operator overloading!  
+}
+
+
+
+#Subroutine "store_tracking_info" with high complexity score (28) Consider refactoring.  (Severity: 3)
+
+sub store_tracking_info{
+  my $self         = shift;
+  my $storable     = shift;
+  my $params       = shift || {};
+  my $table_name   = $self->get_valid_stored_table_name($storable);   
+  my $allow_update = (exists $params->{allow_update}) ? $params->{allow_update} : 0;
+  my $purge        = (exists $params->{purge})        ? $params->{purge}        : 0;
+  my $info         = (exists $params->{info})         ? $params->{info}         : undef;
+  
+
+  if(! defined $info){
+    if(! exists $storable->{tracking_info}){
+      throw('Found no tracking info to store. Please set info using tracking methods '.
+      'if they are available, else pass the info hash parameters, but not both'); 
+    }
+    
+    $info = $storable->{tracking_info};
+  }
+  elsif(exists $storable->{tracking_info}){
+    #Does this risk unecessary failure if the tracking info 
+    #has has been autovivified for some reason with null values?
+    #This should never happen. 
+    throw('An info hash parameter has been passed for a '.$table_name.
+      " Storable which already has a tracking_info hash set\n".
+      'Please use the existing tracking methods if available else pass the info hash parameter, but not both');
+  }
+  
+  assert_ref($info, 'HASH', 'Tracking info HASH');
+  
+  #Grab the existing data to ensure we return/set the complete set of tracking 
+  #info after an update
+  my $stored_info = $self->fetch_tracking_info($storable);
+  
+  #Compare hashes to avoid unecessary INSERT which may 
+  #fail if we have not specified allow_update
+  my $info_is_identical = 0;
+
+  if(keys %$stored_info){
+     $info_is_identical = 1; 
+    foreach my $key(keys %$stored_info){ #This will have all the column keys
+      if( ( (defined $stored_info->{$key}) && 
+             ((! exists $info->{$key}) || ($stored_info->{$key} ne $info->{$key})) ) ||
+          ( (! defined $stored_info->{$key}) && 
+             (exists $info->{$key}) && (defined $info->{$key})) ){  
+        #This last test does not handle empty strings
+        $info_is_identical = 0;;
+      }
     }
   }
-   
-  return \@embargoed;  
+  #Test for unexpect info items  
+  my @valid_cols = $self->_columns($table_name);
+
+  foreach my $col(keys %$info){
+    
+    if(! $self->_is_column($table_name, $col) ){
+      #Could also grep this from @valid_cols?
+      throw("Found unexpected parameter in tracking info hash:\t".$col.
+        "Must be one of:\t@valid_cols");  
+    }  
+  }
+  return if $info_is_identical ;
+
+  #Test for mandatory info items, and build cols/values
+  my @cols       = ($table_name.'_id');
+  my @values     = ($storable->dbID);
+  
+  foreach my $col(@valid_cols){
+    
+    #Need to handle update here. There is no way of knowing whether the record has
+    #already been stored, so we just skip this test if $allow_update is set
+    #and let the eval handle the failure
+    
+    if($self->_is_mandatory_column($table_name, $col) &&
+       ((! exists $info->{$col}) || (! defined $info->{$col}))){
+      throw("Mandatory tracking column must be defined:\t$col\n$table_name:\t".$storable->name);     
+    }       
+    
+    #This only updates those attributes which are set unless purge is set. 
+    #In which case undef attribs will be autovivified as undef(or NULL/default in the DB)
+    
+    #Hmm, this will not update current update NULLs!
+    #e.g. when we want to reset a download_date to NULL
+    #This makes the line between overwrite and update a bit murky
+    #If we allow NULLs to be specified then we risk overwriting the data
+    #especially if the tracking hash has been autovivified
+    #This is only done after a fetch, so the data always matches the DB
+    #The only risk is that someone may use the _columns method
+    #to generate the info hash and leave some keys undef, which maybe defined in the DB
+    #Even grabbing the store_info in set_download_status_by_input_subset_id
+    #wont protect again this? What if we fetch the stored_info first
+    #create the full valid hash, then specify purge in set_download_status_by_input_subset_id    
+    
+    #Never update NULLs here unless $purge is set!
+    
+    if(defined $info->{$col} || $purge){
+      push @cols,   $col; 
+      push @values, $info->{$col};
+    }
+  }
+  
+  my $sql = "INSERT IGNORE into ${table_name}_tracking(".join(', ', @cols).
+    ') values("'.join('", "', @values).'")';
+  
+  if($allow_update){
+    $sql .= 'ON DUPLICATE KEY UPDATE '.join(', ', (map {"$_=values($_)"} @cols));  
+  }
+  
+  #Use SQLHelper::execute_update here?
+  #Although working with DBConnection here provides error handling  
+  my $row_cnt;
+  my $db = $self->db;
+  if(! eval { $row_cnt = $db->dbc->do($sql); 1 }){
+    my $update_warn = '';
+    
+    if($allow_update){
+      $update_warn = 'This maybe because allow_update is specified for an absent row '.
+        "and the mandatory columns have not been specified:\n\t".
+        join(' ', $self->_mandatory_columns)."\n";
+    }
+     
+    throw("Failed to insert using sql:\t$sql\n${update_warn}$@");
+  }
+  
+  #This shoudl always be greater than 1
+  #$row_cnt = 0 if $row_cnt eq '0E0';
+
+  #Overwrite set info KV pairs in stored_info
+  #so we're sure have the complete set of tracking data
+  #if allow_update was used with incomplete data.
+ 
+  foreach my $key(keys %$info){
+    $stored_info->{$key} = $info->{$key};  
+  }
+  
+  $self->_inject_tracking_methods($storable);
+  $storable->{tracking_info} = $stored_info;  
+  
+  return $storable;  
 }
+
+
+sub get_valid_stored_table_name{
+  my $self     = shift;
+  my $storable = shift || throw('Must pass a Storable object argument');
+    
+  (my $class = ref($storable)) =~ s/.*:://;
+  my $table_name = get_table_name_from_class($class);
+  
+  if(! exists $tracking_columns{$table_name}){
+    throw("$class table_name ($table_name) does not correspond to a valid tracking class:\n\t".
+      join("\n\t", keys %tracking_columns));  
+  }
+  
+  $self->db->is_stored_and_valid('Bio::EnsEMBL::Funcgen::'.$class, $storable);
+  
+  return $table_name;  
+}
+
+
+#Move this to DBAdaptor?
+#Not BaseAdaptor as this is not a BaseAdaptor (is multi table adaptor)
+#but probably shouldn't be DBAdaptor either?
+
+sub get_table_name_from_class{
+  my $class = shift || throw('Must provide a class argument');
+  return lc(join('_', split_CamelCase($class)));
+}
+
+
 
 1;

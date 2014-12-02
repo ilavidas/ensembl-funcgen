@@ -103,7 +103,9 @@ sub new {
                   {
                    names    => [ 'name1', 'name2' ],
                    analyses => [ $analysis_obj1, $analysis_obj2 ],
-                  }
+                  },
+                 optional_contraints =>
+                  {an_optional_contraint => undef} 
                 }
                This method will iterate through the cosntraints keys calling
                _constrain_${constraints_key} e.g. _constrain_analyses.
@@ -142,16 +144,25 @@ sub compose_constraint_query{
   my ($self, $params) = @_;
 
   if($params &&
-	 (ref($params) ne 'HASH') ){
-	throw('You must pass a valid params HASHREF to compose_constraint_query');
+	   (ref($params) ne 'HASH') ){
+    throw('You must pass a valid params HASHREF to compose_constraint_query');
   }
 
+  #Get main table syn here and pass, to reduce redundancy in _constrain methods
+
   my @constraints;
+ 
+  #Currently no redundancy checking between constraints and optional_constraints
+  #Redundant constraints may result in an SQL error if any tables are added
+  #otherwise will either return as normal if the constraint values are the same
+  #else will return nothing due to the mutually exclusive constraint
 
   for my $con_type (qw(constraints optional_constraints)){ 
-
+    
     if( exists ${$params}{$con_type} ){
-  
+      #Handle/delete logic_names here and return undef if not valid
+      #such that we can return early from caller (as fetch_all_by_Slice_constraint does).
+      
       foreach my $constraint_key(keys (%{$params->{$con_type}})){
         #warn "$con_type $constraint_key = ".$params->{$con_type}{$constraint_key};
         my $constrain_method = '_constrain_'.$constraint_key;
@@ -312,8 +323,10 @@ sub _table_name {
 =head2 store_states
 
   Arg [1]    : Bio::EnsEMBL::Funcgen::Storable
+  Arg [2]    : Arrayref (optional) - States to store
   Example    : $rset_adaptor->store_states($result_set);
-  Description: Stores states of Storable in status table.
+  Description: Stores states in status table. By default will store state
+               attributes, but will also store optioanlly specified states
   Returntype : None
   Exceptions : Throws if Storable is not stored
   Caller     : General
@@ -322,10 +335,13 @@ sub _table_name {
 =cut
 
 sub store_states{
-  my ($self, $storable) = @_;
+  my $self     = shift;
+  my $storable = shift;
+  my $states   = shift || [];
   assert_ref($storable, 'Bio::EnsEMBL::Funcgen::Storable');
+  assert_ref($states, 'ARRAY', 'optional states');
 
-  foreach my $state(@{$storable->get_all_states()}){
+  foreach my $state((@{$storable->get_all_states()}, @$states)){
     
     if (! $self->has_stored_status($state, $storable)){
       $self->store_status($state, $storable) 
@@ -449,10 +465,7 @@ sub _test_funcgen_table{
   #Does this test for ad
 
   my @tables = $obj->adaptor->_tables;
-
   my ($table) = @{$tables[0]};
-  #InputSubSet fix, as doesn't have own adaptor
-  $table = 'input_subset' if $obj->isa('Bio::EnsEMBL::Funcgen::InputSubset');
 
   return $table || $self->throw("Cannot identify table name from $obj adaptor");
 }
@@ -535,10 +548,10 @@ sub has_stored_status{
 =cut
 
 sub store_status{
-  my ($self, $state, $obj) = @_;
-
-  my $sql;
-  my $table = $self->_test_funcgen_table($obj);
+  my $self   = shift;
+  my $state  = shift;
+  my $obj    = shift;
+  my $table  = $self->_test_funcgen_table($obj);
 
   if(! $self->has_stored_status($state, $obj)){
     my $status_id = $self->_get_status_name_id($state);
@@ -547,81 +560,92 @@ sub store_status{
       throw("$state is not a valid status_name for $obj:\t".$obj->dbID);
     }
 
-	$sql = "INSERT into status(table_id, table_name, status_name_id) VALUES('".$obj->dbID()."', '$table', '$status_id')";
-	$self->db->dbc->do($sql);
-
-	#Setting it in the obj if it is not already present.
-	$obj->add_status($state) if(! $obj->has_status($state, $obj));
+	  my $sql = "INSERT into status(table_id, table_name, status_name_id) VALUES('".
+	   $obj->dbID()."', '$table', '$status_id')";
+	  
+	  if(! eval { $self->db->dbc->do($sql); 1}){ 
+	   throw("Failed to store apparently unstored $state status for $obj (dbID=".
+	     $obj->dbID."\nPotential race condition with parallel process\n$@");
+	  }
+	  
+	  #Setting it in the obj if it is not already present.
+	  $obj->add_status($state) if ! $obj->has_status($state, $obj);
   }
-
+  
   return;
 }
 
 
 =head2 revoke_status
 
-  Arg [1]    : string - status name e.g. 'IMPORTED'
+  Arg [1]    : String - status name e.g. 'IMPORTED'
   Arg [2]    : Bio::EnsEMBL::Funcgen::Storable
+  Arg [3]    : Boolean - Validate status name flag. Will throw if not valid.
   Example    : $rset_adaptor->revoke_status('DAS DISPLAYABLE', $result_set);
   Description: Revokes the given state of Storable in status table.
-  Returntype : None
+  Returntype : Boolean - Success or Failure
   Exceptions : Warns if storable does not have state
-               Throws is status name is not valid
-               Throws if not state passed
+               Throws is status name is not defined
+               Throws if status record delete fails
   Caller     : General
-  Status     : At Risk
+  Status     : Stable
 
 =cut
 
-sub revoke_status{
-  my ($self, $state, $storable) = @_;
+#Where is the return value use(d|ful)
 
-  throw('Must provide a status name') if(! defined $state);
-  my $table_name = $self->_test_funcgen_table($storable);
-  my $status_id = $self->_get_status_name_id($state);
+sub revoke_status{
+  my $self            = shift;
+  my $state           = shift or throw('Must provide a status name');
+  my $storable        = shift;
+  my $validate_status = shift;
+  my $table_name      = $self->_test_funcgen_table($storable);
+  my $status_id       = $self->_get_status_name_id($state, $validate_status);
+  my $revoked         = 0;
 
   if ($status_id){
 
-    #hardcode for InputSubset
-    $table_name = 'input_subset' if $storable->isa('Bio::Ensembl::Funcgen:InputSubset');
-
-
     if(! $self->has_stored_status($state, $storable)){
-  	warn $storable.' '.$storable->dbID()." does not have status $state to revoke\n";
-  	return;
+  	  warn $storable.' '.$storable->dbID()." does not have status $state to revoke\n";
     }
-
-    #do sanity checks on table to ensure that IMPORTED does not get revoke before data deleted?
-    #how would we test this easily?
-
-    my $sql = "delete from status where table_name='${table_name}'".
-  	 " and status_name_id=${status_id} and table_id=".$storable->dbID();
-
-    $self->db->dbc->db_handle->do($sql);
-
-    #now splice from status array;
-    #splice in loop should work as we will only see 1
-    #Just hash this?
-
-    for my $i(0..$#{$storable->{'states'}}){
-
-  	  if($storable->{'states'}->[0] eq $state){
-  	    splice @{$storable->{'states'}}, $i, 1;
-  	    last;
-  	  }
+    else{
+      #do sanity checks on table to ensure that IMPORTED does not get revoke before data deleted?
+      #how would we test this easily?
+      my $sql = "delete from status where table_name='${table_name}'".
+    	 " and status_name_id=${status_id} and table_id=".$storable->dbID();
+      if(! eval { $self->db->dbc->do($sql); 1}){ 
+        throw("Failed to delete $state status from DB for $storable (dbID=".
+          $storable->dbID.")\n$@");
+      }
+      
+      my @tmp_states;
+  
+      for my $stored_state(@{$storable->{states}}){
+    
+    	  if($stored_state ne $state){
+      	  push @tmp_states, $stored_state;
+      	}
+      }
+      
+      $storable->{states} = \@tmp_states;
+      $revoked = 1;
     }
   }
-  #throw here?
+  #else{ Don't throw as the state of the object is as expected, but
+  #this may be a mis-spelled status, and the real status may persist
+  #So handle in the caller
 
-  return;
+  return $revoked;
 }
 
 
 =head2 revoke_states
 
   Arg [1]    : Bio::EnsEMBL::Funcgen::Storable
+  Arg [2]    : Arrayref (optional) - States to revoke
+  Arg [3]    : Boolean (optional) - Validate status exists
   Example    : $rset_adaptor->revoke_status($result_set);
-  Description: Deletes all status records associated with the passed Storable.
+  Description: Deletes all or specified status records from the Storable.
   Returntype : Bio::EnsEMBL::Funcgen::Storable
   Exceptions : None
   Caller     : General + Helper rollback methods
@@ -630,17 +654,32 @@ sub revoke_status{
 =cut
 
 sub revoke_states{
-  my ($self, $storable) = @_;
+  my $self     = shift;
+  my $storable = shift;
+  my $states   = shift || [];
+  my $validate = shift;
+  assert_ref($states, 'ARRAY', 'optional states');
 
-  my $table_name = $self->_test_funcgen_table($storable);
-  #add support for InputSubset which doesn't currently have an adaptor
-  $table_name = 'input_subset' if $storable->isa('Bio::Ensembl::Funcgen::InputSubset');
-  my $sql = "delete from status where table_name='${table_name}'".
-	" and table_id=".$storable->dbID();
-
-  #Do delete and clear stored states
-  $self->db->dbc->db_handle->do($sql);
-  undef $storable->{'states'};
+  if(! @$states){
+    my $table_name = $self->_test_funcgen_table($storable);
+    undef $storable->{states};
+    my $sql = "delete from status where table_name='${table_name}'".
+      " and table_id=".$storable->dbID();
+   
+    if(! eval {$self->db->dbc->do($sql); 1}){
+     throw('Failed to revoke states('.join(' ', @{$storable->get_all_states}).
+      ") for $storable (dbID=".$storable->dbID."\n$@");  
+    }
+  }
+  else{
+    
+    foreach my $state(@$states){
+     $self->revoke_status($state, $storable, $validate);
+     #Cannot return revoked boolean here. Bu this only return false if
+     #it didn't already have the status
+    }
+  }
+  
   return $storable;
 }
 
@@ -657,40 +696,43 @@ sub revoke_states{
 
 =cut
 
+#Move a wrapper to Storable, which handles the obj attributes
+#which then call this method to remove the status entries?
+
 #This needs to be used by RunnableDBs too!
 #All state stuff is handled by BaseAdaptor?
 #Can we put this in the SetAdaptor?
 
+#CoordSystem specific status may go, if we are removing multi CoordSys support
+
 sub set_imported_states_by_Set{
-  my ($self, $set) = @_;
-
+  my $self = shift;
+  my $set  = shift;
   $self->db->is_stored_and_valid('Bio::EnsEMBL::Funcgen::Set', $set);
-  #This should really be restricted to FeatureSet and ResultSet
+  return $self->store_states($set, $self->_imported_states);
+}
 
-  #Store default states for FeatureSets
-  #DAS_DISPLAYABLE IMPORTED_'CSVERSION'
-  #These need to insert ignore as may already be present?
-  #Insert ignore may not catch an invalid status
-  #So add states and store states as this checks
-  $set->adaptor->store_status('DAS_DISPLAYABLE', $set);
+sub revoke_imported_states_by_Set{
+  my $self = shift;
+  my $set  = shift;
+  $self->db->is_stored_and_valid('Bio::EnsEMBL::Funcgen::Set', $set);
+  return $self->revoke_states($set, $self->_imported_states);
+}
 
 
-  #To get assembly version here we need to
-  # 1 get the current default chromosome version
-  # or/and
-  # 2 Use the assembly param to guess it from the coord_sys table
-  # #This may pose problems for DB names which use numbers in their genebuild version
-  # Would need to set this as a flag and/or specify the genebuild version too
-  # Currently dnadb is set to last dnadb with 'assembly' as default version
-  # We should match as test, just to make sure
 
+
+sub _imported_states{
+  my $self = shift;
   #Get default chromosome version for this dnadb
-  my $cs_version = $self->db->dnadb->get_CoordSystemAdaptor->fetch_by_name('chromosome')->version;
-
-  #Sanity check that it matches the assembly param?
-  #Woould need to do this if ever we loaded on a non-default cs version
-
-  $set->adaptor->store_status("IMPORTED_${cs_version}", $set);
+  
+  if(! defined $self->{imported_states}){
+    $self->{imported_states} = ['IMPORTED', 
+                                 'IMPORTED_'.
+                                  $self->db->dnadb->get_CoordSystemAdaptor->fetch_by_name('chromosome')->version];
+  }
+  
+  return $self->{imported_states}; 
 }
 
 
@@ -885,11 +927,12 @@ sub fetch_all_by_external_names{
 =cut
 
 sub fetch_all_by_linked_Transcript{
-  my ($self, $tx) = @_;
+  my $self = shift;
+  my $tx   = shift;
+  assert_ref($tx, 'Bio::EnsEMBL::Transcript');
 
-  if(! $tx ||
-	 ! (ref($tx) && $tx->isa('Bio::EnsEMBL::Transcript') && $tx->dbID)){
-	throw('You must provide a valid stored Bio::EnsEMBL:Transcript object');
+  if(! $tx->dbID ){
+	   throw('You must provide a stored Bio::EnsEMBL:Transcript object');
   }
 
   return $self->fetch_all_by_external_name($tx->stable_id, $self->db->species.'_core_Transcript')
@@ -910,18 +953,18 @@ sub fetch_all_by_linked_Transcript{
 
 =cut
 
-
 sub fetch_all_by_linked_transcript_Gene{
-   my ( $self, $gene ) = @_;
-
-   if(! $gene ||
-	  ! (ref($gene) && $gene->isa('Bio::EnsEMBL::Gene') && $gene->dbID)){
-	 throw('You must provide a valid stored Bio::EnsEMBL:Gene object');
-   }
-   #No need to quote param here as this is a known int from the DB.
-   my $tx_sids = $gene->adaptor->db->dbc->db_handle->selectcol_arrayref('select tsid.stable_id from transcript_stable_id tsid, transcript t where t.gene_id='.$gene->dbID.' and t.transcript_id=tsid.transcript_id');
-
-   return $self->fetch_all_by_external_names($tx_sids, $self->db->species.'_core_Transcript');
+  my $self = shift;
+  my $gene = shift;
+  assert_ref($gene, 'Bio::EnsEMBL::Gene'); 
+ 
+  if(! $gene->dbID ){
+     throw('You must provide a stored Bio::EnsEMBL::Gene object');
+  }
+  
+  #No need to pass params here as we know the gene ID is an int from the db 
+  my $tx_sids = $gene->adaptor->db->dbc->sql_helper->execute_simple('select t.stable_id from transcript t where t.gene_id='.$gene->dbID);
+  return $self->fetch_all_by_external_names($tx_sids, $self->db->species.'_core_Transcript');
 }
 
 

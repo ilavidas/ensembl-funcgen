@@ -35,10 +35,14 @@ package Bio::EnsEMBL::Funcgen::Hive::RunIDR;
 
 use warnings;
 use strict;
- 
-use Bio::EnsEMBL::Utils::Exception         qw( throw );
-use Bio::EnsEMBL::Funcgen::Utils::EFGUtils qw( scalars_to_objects run_system_cmd );
-use base ('Bio::EnsEMBL::Funcgen::Hive::BaseDB');
+
+use Bio::EnsEMBL::Utils::Scalar                 qw( assert_ref ); 
+use Bio::EnsEMBL::Utils::Exception              qw( throw );
+use Bio::EnsEMBL::Funcgen::Utils::EFGUtils      qw( scalars_to_objects 
+                                                    run_system_cmd 
+                                                    run_backtick_cmd );
+use Bio::EnsEMBL::Funcgen::Sequencing::SeqTools qw( run_IDR );
+use base qw( Bio::EnsEMBL::Funcgen::Hive::BaseDB );
 
 ### CURRENT ISSUES 
 #
@@ -62,79 +66,44 @@ sub fetch_input {   # fetch parameters...
   
 
   $self->get_param_method('idr_threshold', 'required');
-  $self->get_param_method('output_prefix', 'silent');
-  $self->get_param_method('idr_name', 'silent', $self->output_prefix);
-  $self->param_required('idr_name');
-  $self->param_required('output_dir');
+  
+  #One of these is required, why do we have 2?
+  #It's easier to generate this in the caller
+  #Or do we just use the names to generate the output prefix?
+  #and drop idr_name completely?
+  #How do we get what matches between two string, then do a vs on the rest?
+  
+  $self->get_param_method('output_prefix', 'required');
+  $self->get_param_method('batch_name',    'required');
+  $self->param_required('accu_idx');
+  $self->get_output_work_dir_methods;
+
+  #temp solution to adjust maxpeaks for poor reps
+  $self->get_param_method('bam_files', 'silent');  
+  assert_ref($self->bam_files, 'ARRAY', 'bam_files') if $self->bam_files;
   return;
 }
 
 
 sub run {   # Check parameters and do appropriate database/file operations... 
   my $self          = shift;
-  my $files         = $self->bed_files;
-  my $output_prefix = $self->output_prefix;
-  my $out_dir       = $self->output_dir;
-          
-  #Check we have different files
-  if($files->[0] eq $files->[1]){
-    $self->throw_no_retry("Pre-IDR ResultSets are identical, dbIDs:\t".join(' ', @$files));  
-  }                              
- 
-  #Check we have 2 reps
-  if(scalar (@$files) != 2){
-    $self->throw_no_retry("RunIDR expect 2 replicate bed files:\t".join(' ', @$files));  
-  }
-       
-  #Check output dir exists     
-  if(! -d $out_dir){
-    $self->throw_no_retry("Output directory does not exist:\t$out_dir");  
-  }
-
-  #Set output prefix if we don't have one.
-  if(! defined $output_prefix){
-    my @names;
-    
-    foreach my $file(@$files){
-      (my $name = $file) =~ s/.*\///;  
-      $name =~ s/(\.np_idr)*\.bed$//;
-      push @names, $name;
-    }
-    
-    $output_prefix = $names[0].'_VS_'.$names[1];      
-  }
-
-  #IDR analysis
-  #TODO install idrCode in /software/ensembl/funcgen and add this an analysis?
-  my $idr_name = $self->idr_name;
   
-  my $cmd = 'Rscript ~dz1/utils/idrCode/batch-consistency-analysis.r '. 
-    join(' ', @{$files})." -1 ${out_dir}/${idr_name} 0 F signal.value";  
-  #signal.value is ranking measure here i.e. SWEmbl score                                              
-  run_system_cmd($cmd);      
+  #eval this and throw no retry
+  my $num_peaks;
   
-  #Do this here rather than in post_process so we parallelise the awk.
-  $cmd = "awk '$11 <= ".$self->idr_threshold." {print $0}' ${out_dir}/${output_prefix}-overlapped-peaks.txt | wc -l";
-  my $num_peaks = run_backtick_cmd($cmd);
-
-  #Now, do we write this as an accu entry in the hive DB, or do we want it 
-  #in the tracking DB?
-  #Probably the later, such that we can drop/add reps to an IDR set after we have dropped the hive DB.
-  #There is currently no logic place to put this in the tracking DB!
-  #We would have to add a result_set_idr_stats table to handle the multiplicity
-  #This is probably a good place to store the other IDR stats too?
-  #Just write to file for now until we know if/what we want in the table.
-  #Do we need to be concerned if thresholds differ between combinations? 
-  
-  #Warning: Parallelised appending to file!l
-  $cmd = "echo -e \"IDR Comparison\tIDR Peaks\n$output_prefix\t$num_peaks\" >> ${out_dir}/${idr_name}-idr-stats.txt";
-  run_system_cmd($cmd);
+  if(! eval { $num_peaks = run_IDR(-out_dir       => $self->output_dir, 
+                                   -output_prefix => $self->output_prefix, 
+                                   -threshold     => $self->idr_threshold, 
+                                   -bed_files     => $self->bed_files,
+                                   -batch_name    => $self->batch_name, 
+                                   -bam_files     => $self->bam_files); 1 }){
+    $self->throw_no_retry("Failed to run_IDR ".$self->output_prefix."\n$@");                                   
+  }
   
   $self->set_param_method('num_peaks', $num_peaks);
   
-  
-  #This probably needs writin to the accu table too! So the Postprocess jobs can pick up the min $num_peaks without reading the file
-  
+  #This probably needs writing to the accu table too! 
+  #So the Postprocess jobs can pick up the min $num_peaks without reading the file
 
   #This is old 2 rep only method which sets a new threshold for a subsampled SWEmbl run 
   # as opposed to counting the number of peaks as per the IDR docs   
@@ -154,10 +123,17 @@ sub run {   # Check parameters and do appropriate database/file operations...
   #echo Final run with new -R param set to $new_cutoff
   #SWEMBL -F -V -i $merged_bam -f 150 -R $new_cutoff -o $output -r $control 
    
-  #        $self->branch_job_group($branch, [{%{$batch_params},
-  #                                           dbID       => [$rset->dbID], 
-  #                                           set_name   => [$rset->name],
-  #                                           set_type    => 'ResultSet'}]);){
+
+
+  #TO DO Capture IDR QC output and threshold
+  #accu num_peaks depedant on pass/fail
+  #WHere are the QC metrics????
+  #em.sav and iri.sav are both internally gzip compressed but have no .(t)gz suffix
+  #Its unclear what exactly can read these formats as zless does not
+  
+
+    
+    
   return;
 }
 
@@ -165,7 +141,8 @@ sub run {   # Check parameters and do appropriate database/file operations...
 
 sub write_output {  # Create the relevant jobs
   my $self = shift;
-  #This is accumulated into an array, which is picked up by PostprocessIDR analysis on another branch.
+  #This is insert into an accu array based on the value of accu_idx
+  #This is picked up by PostprocessIDR analysis on another branch.
   $self->dataflow_output_id( {'idr_peak_counts'   => $self->num_peaks}, 2);
   return;
 }

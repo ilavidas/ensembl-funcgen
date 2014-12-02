@@ -37,25 +37,19 @@ Bio::EnsEMBL::Funcgen::InputSubset - A module to represent InputSubset object.
 use Bio::EnsEMBL::Funcgen::InputSubset;
 
 my $input_subset = Bio::EnsEMBL::Funcgen::InputSubset->new
-                    (
-                     -NAME        => $name,
-                     -INPUT_SET   => $iset,
-                     -archive_id  => $archive_id,
-                     -display_url => $display_url,
-                     -replicate   => $iss_rep,
-                     -is_control  => $is_control,
-                    );
+                    (-cell_type     => $cell_type,
+                     -experiment    => $exp,
+                     -feature_type  => $feature_type,
+                     -is_control    => $is_control,
+                     -name          => $name,
+                     -replicate     => $iss_rep);
 
 ($input_subset) = @{$input_subset_adaptor->store($input_subset)};
 
-
 my $control = ($input_set->is_control) ? 'control' : ''; 
   
-print 'InputSubset ('.$input_subset->archive_id.
-  ") is $control replicate ".$input_set->replicate.
-  ":\t".$input_set->name."\nViewable here:\t".$input_set->display_url."\n";
-
-
+print 'InputSubset ('.$input_subset->name.
+  ") is $control replicate ".$input_set->replicate."\n";
 
 =head1 DESCRIPTION
 
@@ -78,17 +72,12 @@ use base qw( Bio::EnsEMBL::Funcgen::Set );
 =head2 new
 
   Example    : my $iss = Bio::EnsEMBL::Funcgen::InputSubset->new
-                            (
-                             -cell_type     => $cell_type,
+                            (-cell_type     => $cell_type,
                              -experiment    => $exp,
                              -feature_type  => $feature_type,
-                             -archive_id    => $archive_id,
-                             -display_url   => $display_url,
                              -is_control    => $is_control,
                              -name          => $name,
-                             -replicate     => $iss_rep,
-                            );
-
+                             -replicate     => $iss_rep);
 
   Description: Constructor for InputSubset objects.
   Returntype : Bio::EnsEMBL::Funcgen::InputSubset
@@ -103,130 +92,34 @@ sub new {
   my $class = ref($caller) || $caller;
   my $self = $class->SUPER::new(@_);
 
-  my (
-      $cell_type,
-      $exp,
-      $feature_type,
-      $archive_id,
-      $display_url,
-      $is_control,
-      $name,
-      $rep,
-      $analysis
-      )
-    = rearrange([
-        'CELL_TYPE',
-        'EXPERIMENT',
-        'FEATURE_TYPE',
-        'ARCHIVE_ID',
-				'DISPLAY_URL',
-        'IS_CONTROL',
-        'NAME',
-        'REPLICATE',
-        'ANALYSIS',
-        ], @_);
+  my ($is_control, $name, $rep) = rearrange
+   (['IS_CONTROL', 'NAME', 'REPLICATE'], @_);
 
-  throw('Must provide a name argument') if !defined $name;
+  #FeatureType and Analysis validated in Set
+  #CellType and Experiment validated in Set if defined  
+ 
+  if(! defined $self->cell_type){
+    throw('Mandatory parameter -cell_type is not defined');
+  }
 
-  assert_ref($exp,          'Bio::EnsEMBL::Funcgen::Experiment');
-  assert_ref($cell_type,    'Bio::EnsEMBL::Funcgen::CellType');
-  assert_ref($feature_type, 'Bio::EnsEMBL::Funcgen::FeatureType');
+  if(! defined $self->experiment){
+    throw('Mandatory parameter -experiment is not defined');
+  }
 
-  $self->{cell_type}    = $cell_type;
-  $self->{experiment}   = $exp;
-  $self->{feature_type} = $feature_type;
-  $self->{archive_id}   = $archive_id;
-  $self->{display_url}  = $display_url;
+  if(! defined $is_control){
+    throw('Must defined an -is_control paramter'); 
+    #is_control cannot be undef, as this will resolve to false
+    #when storing
+  }
+
+
   $self->{is_control}   = $is_control;
   $self->{name}         = $name;
   $self->{replicate}    = $rep;
+  #replicate is fine undef as it is not a boolean field
 
   return $self;
 }
-
-
-=head2 name
-
-  Example    : my $name = $iss->name();
-  Description: Getter for the name of this InputSubset.
-  Returntype : String
-  Exceptions : None
-  Caller     : General
-  Status     : Stable
-
-=cut
-
-sub name { return shift->{name}; }
-
-
-=head2 cell_type
-
-  Example    : my $cell_type = $iss->cell_type;
-  Description: Getter for the cell_type attribute of this InputSubset.
-  Returntype : Bio::EnsEMBL::Funcgen::InputSubset
-  Exceptions : None
-  Caller     : General
-  Status     : Stable
-
-=cut
-
-sub cell_type { return shift->{cell_type}; }
-
-
-=head2 experiment
-
-  Example    : my $experiment = $iss->experiment;
-  Description: Getter for the experiment attribute of this InputSubset.
-  Returntype : Bio::EnsEMBL::Funcgen::InputSubset
-  Exceptions : None
-  Caller     : General
-  Status     : Stable
-
-=cut
-
-sub experiment { return shift->{experiment}; }
-
-
-=head2 feature_type
-
-  Example    : my $feature_type = $iss->feature_type;
-  Description: Getter for the feature_type attribute of this InputSubset.
-  Returntype : Bio::EnsEMBL::Funcgen::InputSubset
-  Exceptions : None
-  Caller     : General
-  Status     : Stable
-
-=cut
-
-sub feature_type { return shift->{feature_type}; }
-
-
-=head2 archive_id
-
-  Example    : my $archive_id = $iss->archive_id;
-  Description: Getter for the archive of this InputSubset.
-  Returntype : String
-  Exceptions : None
-  Caller     : General
-  Status     : Stable
-
-=cut
-
-sub archive_id { return shift->{archive_id}; }
-
-
-=head2 display_url
-
-  Example    : my $url = $iss->display_url;
-  Description: Getter for the display_url of this InputSubset.
-  Returntype : String
-  Exceptions : None
-  Caller     : General
-  Status     : Stable
-
-=cut
-
-sub display_url{ return shift->{display_url}; }
 
 
 =head2 replicate
@@ -278,17 +171,20 @@ sub reset_relational_attributes{
     throw('Must pass a HASHREF, not: ' .ref($params_hash));
   }
 
-  my ($cell_type, $experiment, $feature_type) =
-    rearrange(['CELL_TYPE', 'EXPERIMENT', 'FEATURE_TYPE'],
+  my ($cell_type, $experiment, $feature_type, $analysis) =
+    rearrange(['CELL_TYPE', 'EXPERIMENT', 'FEATURE_TYPE', 'ANALYSIS'],
         %$params_hash);
 
   assert_ref($cell_type,    'Bio::EnsEMBL::Funcgen::CellType');
   assert_ref($experiment,   'Bio::EnsEMBL::Funcgen::Experiment');
   assert_ref($feature_type, 'Bio::EnsEMBL::Funcgen::FeatureType');
-
+  assert_ref($analysis,     'Bio::EnsEMBL::Analysis');
+  
   $self->{cell_type}     = $cell_type;
   $self->{experiment}    = $experiment;
+  $self->{experiment_id} = $experiment->dbID;
   $self->{feature_type}  = $feature_type;
+  $self->{analysis}      = $analysis;
 
   # Undef dbID and adaptor by default
   if(! $no_db_reset){
@@ -328,28 +224,35 @@ sub reset_relational_attributes{
 sub compare_to {
   my ($self, $obj, $shallow, $scl_methods, $obj_methods) = @_;
 
-  $scl_methods ||= [qw(name archive_id display_url replicate is_control)];
+  $scl_methods ||= [qw(name replicate is_control)];
   $obj_methods ||= [qw(cell_type experiment feature_type analysis)];
 
   return $self->SUPER::compare_to($obj, $shallow, $scl_methods, $obj_methods);
 }
 
 
-##### Deprecated ####
+##### DEPRECATED METHODS ####
 
-=head2 input_set
 
-  Example    : my $input_set = $input_sset->input_set;
-  Description: Getter for the input_set attribute of this InputSubset.
-  Returntype : Bio::EnsEMBL::Funcgen::InputSet
-  Exceptions : None
-  Caller     : General
-  Status     : Deprecated, could return multiple InputSets
-
-=cut
-
-sub input_set {
-  throw('v74, deprecated, please use InputSetAdaptor->fetch_all_by_InputSubsets');
+sub input_set {#DEPRECATED in v74
+  throw('DEPRECATED please use InputSetAdaptor->fetch_all_by_InputSubsets');
 }
+
+
+#DEPRECATED in v76
+
+sub archive_id { 
+    throw('DEPRECATED: Please use \'name\' or access the Experiment archive_id method');
+    return shift->{archive_id}; 
+}
+
+sub display_url{ 
+  throw('DEPRECATED: Please use the Experiment display_url method');
+  return shift->{display_url}; 
+}
+
+
+
+
 1;
 

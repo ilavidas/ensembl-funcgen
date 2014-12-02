@@ -49,64 +49,69 @@ package Bio::EnsEMBL::Funcgen::Utils::EFGUtils;
 use warnings;
 use strict;
 
+use File::Find; #qw( find )
 use Digest::MD5;
 use Bio::EnsEMBL::Utils::Exception qw( throw      );
 use Bio::EnsEMBL::Utils::Scalar    qw( assert_ref );
+use Data::Dumper                   qw( Dumper );
 use Scalar::Util                   qw( blessed    );
 use File::Path                     qw( make_path  );
 use File::Basename                 qw( dirname fileparse );
 use File::Spec;
 use Time::Local;
 use FileHandle;
-use Carp;
+use Carp qw( confess );
 
 use base qw( Exporter );
-use vars   qw( @EXPORT_OK );
+use vars qw( @EXPORT_OK );
 
 @EXPORT_OK = qw(
+  add_DB_url_to_meta
   add_external_db
-  add_hive_url_to_meta
   assert_ref_do
   assert_refs
   assert_refs_do
   backup_file
-  convert_bam_to_sam
+  check_file
   create_Storable_clone
+  convert_strand
   dump_data
   file_suffix_parse
+  generate_checksum
   generate_slices_from_names
+  get_alignment_file_prefix_by_ResultSet
+  get_set_prefix_from_Set
+  get_study_name_from_Set
   get_current_regulatory_input_names
   get_date
-  get_files_by_formats
   get_file_format
   get_month_number
-  get_my_scalar_name
-  get_feature_file
   gunzip_file
   is_bed
   is_gzipped
   is_sam
   mean
   median
-  merge_bams
   open_file
   parse_DB_url
   path_to_namespace
-  process_bam
-  process_sam_bam
   run_backtick_cmd
   run_system_cmd
   scalars_to_objects
   set_attributes_by_my_scalar_names
   species_chr_num
   species_name
+  split_CamelCase
   strip_param_args
   strip_param_flags
   url_from_DB_params
   validate_checksum
+  validate_package_path
   validate_path
+  validate_sam_header
+  which_path
   write_checksum
-  );
+ );
 
 
 
@@ -114,9 +119,12 @@ use vars   qw( @EXPORT_OK );
 #Split out methods into FileUtils.pm?
 
 
-my %bed_strands = ('+' =>  1,
-                   '-' => -1,
-                   '.' =>  0);
+my %strand_syns = ('+'  =>  1,
+                   '-'  => -1,
+                   '.'  =>  0,
+                   '1'  => 1,
+                   '0'  => 0,
+                   '-1' => '-1');
 
 
 
@@ -133,41 +141,9 @@ sub add_external_db{
     $efg_db->dbc->do('insert into external_db (db_name, db_release, status, dbprimary_acc_linkable, priority, db_display_name, type) '.
       "values('$db_name', '$db_release', 'KNOWNXREF', '1', '5', '$db_display_name', 'MISC')");
   }
-}
-
-
-#Move to PipelineUtils?
-
-sub add_hive_url_to_meta {
-  my ($url, $db) = @_;
-
-  #VALIDATE ARGS
-  parse_DB_url($url);
-  assert_ref($db, 'Bio::EnsEMBL::DBSQL::DBAdaptor', 'db');#restrict this to Funcgen?
-
-  my $mc         = $db->get_MetaContainer;
-  my $meta_key = 'hive_url';
-
-  my $meta_value = $mc->single_value_by_key($meta_key);
-
-  if( ! defined $meta_value){ #Store the new meta entry
-    #Add key via API to store with appropriate species_id
-    eval { $mc->store_key_value($meta_key, $url); };
-
-    if($@){
-      throw("Failed to store hive url meta entry:\t$meta_key\t$url\n$@");
-    }
-  }
-  elsif($meta_value ne $url){
-    throw("Could not set hive_url meta entry:\t".$url."\nAs ".$db->dbc->dbname.
-      " is currently locked to a different hive DB:\t$meta_value\n".
-      'Please use that hive DB or drop that pipeline, or remove the meta entry');
-  }
-  #else meta values match and all is good.
-
+  
   return;
 }
-
 
 
 =head2 assert_ref_do
@@ -193,10 +169,8 @@ sub add_hive_url_to_meta {
 
 sub assert_ref_do {
   my ($ref, $expected, $method, $attribute_name) = @_;
-
   #Can't do this as we expect a method return value
   #return 1 unless $ASSERTIONS;
-  my $value;
 
   $attribute_name ||= '-Unknown-';
   throw('No method given') if ! defined $method;
@@ -277,11 +251,11 @@ sub backup_file{
 
   if (-f $file_path) {
     #$self->log("Backing up:\t$file_path");
-    system ("mv ${file_path} ${file_path}.".`date '+%T'`) == 0 || return 0;
+    my $date = run_backtick_cmd('date \'+%T\'');
+    system ("mv ${file_path} ${file_path}.${date}") == 0 || return 0;
   }
 
   return 1;
-
 }
 
 
@@ -319,31 +293,29 @@ sub create_Storable_clone {
 }
 
 sub dump_data {
-  my ($data, $indent, $terse) = @_;
-  if(defined $indent and $indent !~ /[0123]/){
+  my $data   = shift;
+  my $indent = shift;
+  my $terse  = shift;
+  
+  if((defined $indent) and $indent !~ /[0-3]/o){
     throw("Indent must be 0,1,2,3 not $indent");
   }
-  $indent = defined($indent) ? $indent : 2;
-  $terse = ($terse) ? $terse : undef;
+  
+  $indent = 2 if ! defined $indent;
 
   my $dumper = Data::Dumper->new([$data]);
   $dumper->Indent($indent);
-  $dumper->Terse($terse);
-  my $dump = $dumper->Dump();
-  return $dump;
+  $dumper->Terse($terse) if $terse;
+  
+  return $dumper->Dump;
 }
 
 
 #Do this as File::Basename doesn't quite get there.
 
 sub file_suffix_parse{
-  my $filepath = $_[0];
-
-  my $file_name                  = fileparse($filepath);
-  (my $file_prefix = $file_name) =~ s/\.[a-zA-Z0-9]$//;
-  (my $suffix      = $file_name) =~ s/$file_prefix\.//;
-
-  return ($file_prefix, $suffix);
+  my $filepath = shift;
+  return (fileparse($filepath) =~ /(.*)\.([^\.]+)$/);
 }
 
 
@@ -351,7 +323,13 @@ sub file_suffix_parse{
 #slice ref args can be array ref (inc empty) or undef
 
 sub generate_slices_from_names{
-  my ($slice_adaptor, $slice_names, $skip_slices, $level, $non_ref, $inc_dups, $assembly) = @_;
+  my $slice_adaptor = shift;
+  my $slice_names   = shift;
+  my $skip_slices   = shift;
+  my $level         = shift;
+  my $non_ref       = shift;
+  my $inc_dups      = shift;
+  my $assembly      = shift;
   my (@slices, $slice, $sr_name, $have_slice_names, $have_skip_slices);
 
   #Test if $assembly is old?
@@ -380,23 +358,20 @@ sub generate_slices_from_names{
 
     foreach my $name(@$slice_names){
       $slice = $slice_adaptor->fetch_by_region(undef, $name, undef, undef, undef, $assembly);
-
-      #WHy is this failing for hap regions?
+      #Why is this failing for hap regions?
 
       if(! $slice){
 
-        #Need to eval this as it will break with incorrect formating
-
-        eval { $slice = $slice_adaptor->fetch_by_name($name) };
-
-        if(! $slice){
+        if(! (eval { $slice = $slice_adaptor->fetch_by_name($name); 1 } &&
+              defined $slice) ){
+          #Need to eval this as it will break with incorrect formating
           throw("Could not fetch slice by region or name:\t".$name);
         }
       }
 
       $sr_name = $slice->seq_region_name;
 
-      next if(grep/^${sr_name}$/, @$skip_slices);
+      next if(grep { /^${sr_name}$/ } @$skip_slices);
       push @slices, $slice;
     }
   }
@@ -416,9 +391,9 @@ sub generate_slices_from_names{
 
     if($have_skip_slices){
 
-      foreach $slice(@tmp_slices){
+      foreach my $slice(@tmp_slices){
         $sr_name = $slice->seq_region_name;
-        push @slices, $slice if ! grep/^${sr_name}$/, @$skip_slices;
+        push @slices, $slice if ! grep { /^${sr_name}$/ } @$skip_slices;
       }
     }
     else{
@@ -541,355 +516,39 @@ sub get_date{
 }
 
 
-
-#This handles g/unzipping and conversion from bam > sam > bed
-#This also assumes that we only ever want to convert in this direction
-#i.e. assumes bam /sam will always exist if we have bed.
-
-#sam params contains:
-#ref_fai         => file_path
-#filter_from_bam => 1
-#could also support:
-#include_MT   => 1,
-#include_dups => 1,
-#ignore header mismatch? (could do thi swith levels, which ignore supersets in fai?
-
-#Currently hardoded for samse files name for sam and bed
-#todo _validate_sam_params
-
-
-#$formats should be in preference order? Although this doesn't break things, it will just return a non-optimal file format
-
-#Slightly horrible method to manage acquisition and conversion of files between
-#supported formats (not necessarily feature formats)
-#all_formats is necessary such that we don't redundant process files which are on the same conversion path when we have filter_format set
-
-
-#There is a possibility that the formats provided might not have the same root, and so
-#filter_from_format may be invlaid for one
-#In this case two method calls might be require, hence we don't want to throw here if we can't find a file
-
-  #This seems over-engineered! But we definitely need the ability to request two formats at the same time
-  #to prevent parallel requests for the same file
-
-  #Filtering will normally be done outside of this method, by the alignment pipeline
-  #however, we must support it here incase we need to refilter, or we get alignment files
-  #supplied outside of the pipeline
-
-
-#what about if we only have the unfiltered file
-#but we ask for filtered
-#should we automatically filter?
-#should we move handling 'unfiltered' to here from get_alignment_files_by_InputSet_formats?
-#Is this too pipeline specific?
-#what if some files don't use the 'unfiltered' convention?
-#then we may get warnings or failures if the in_file and the out_file match
-#would need to expose out_path as a parameter
-#which would then need to be used as the in path for all subsequent conversion
-#No this wouldn't work as it would change the in file to contain unfiltered
-#which might not be the case.
-
-sub get_files_by_formats {
-  my ($path, $formats, $params) = @_;
-  assert_ref($formats, 'ARRAY');
-  $params ||= {};
-  assert_ref($params, 'HASH');
-  $params->{sort}     = 1 if ! defined $params->{sort};     #Always sort if we call process_$format
-  #process_$format will never be called if $format file exists, hence no risk of a redundant sort
-  #for safety, only set this default if filter_from_format is defined? in block below
-
-  $params->{checksum} = 1 if ! defined $params->{checksum}; #validate and check
-
-  if(scalar(@$formats) == 0){
-    throw('Must pass an Arrayref of file formats/suffixes in preference order e.g. [\'sam\', \'bed\']');
-  }
-
-  my %conversion_paths = ( bam => ['bam'],
-                           sam => ['bam', 'sam'],
-                           bed => ['bam', 'sam', 'bed'],
-                           #we always need the target format as the last element
-                           #such that we can validate the filter_format e.g. for bam
-                           #if the path array only has one element, it must match the key
-                           #and this constitues calling filter_bam
-                           #or if filter_format not set, just grabbing the bam file
-
-                           #This approach prevents being able to | bam sort/filters through
-                           #to other cmds, so may be slower if we don't need to keep intermediate files?
-
-                           #Could also have non-bam rooted paths in here
-                           #and maybe multiple path with different roots?
-                         );
-
-  my $can_convert           = 0;
-  my $clean_filtered_format = 0;
-  my $filter_format         = $params->{filter_from_format};
-  my $all_formats           = $params->{all_formats};
-  my $done_formats          = {};
-  my ($files, @feature_files);
-
-  #Add filter format if it is not in $formats
-  if($filter_format &&
-     (! grep(/^$filter_format$/, @$formats) ) ){
-    unshift @$formats, $filter_format;
-    $clean_filtered_format = 1;
-  }
-
-  #Attempt to get the first or all formats
-  foreach my $format(@$formats){
-    my $can_filter = 0;
-
-    #Do this before simple file test as it is quicker
-    if(grep(/^${format}$/, (keys %$done_formats))){ #We have already created this format
-      next;
-    }
-
-    #Simple/quick file test first before we do any conversion nonsense
-    #This also means we don't have to have any conversion config to get a file which
-    
-    #This is being undefd after we filter, so hence, might pick up a pre-exising file!
-    if(! defined $filter_format){
-
-       if(my $from_path = check_file($path.'.'.$format, 'gz', $params)){#we have found the required format
-          $done_formats->{$format} = $from_path;
-          next;
-       }
-    }
-
-
-    ### Validate we can convert ###
-    if(exists $conversion_paths{$format}){
-      $can_convert = 1;
-
-      if(defined $filter_format){
-
-        if( ($conversion_paths{$format}->[0] ne $filter_format) &&
-            ($all_formats) ){
-          throw("Cannot filter $format from $filter_format for path:\n\t$path");
-        }
-        elsif((scalar(@{$conversion_paths{$format}}) == 1 ) ||
-              (! $clean_filtered_format)){
-          my $filter_method = 'process_'.$filter_format;
-          $can_filter = 1;
-
-          #Sanity check we can call this
-          if(! ($filter_method = Bio::EnsEMBL::Funcgen::Utils::EFGUtils->can($filter_method))){
-            throw("Cannot call $filter_method for path:\n\t$path\n".
-              'Please add method or correct conversion path config hash');
-          }
-
-          #Set outfile here so we don't have to handle unfiltered in process_sam_bam
-          #don't add it to $params as this will affected all convert methods
-          (my $outpath = $path) =~ s/\.unfiltered$//o;
-
-          #$format key is same as first element
-
-          $done_formats->{$format} = $filter_method->($path.'.'.$filter_format, {%$params, 
-                                                                          out_file => $outpath.'.'.$filter_format} );       
-          #so we don't try and refilter when calling convert_${from_format}_${to_format}
- 
-          #delete $params->{filter_from_format};#Is this right?
-
-          undef $filter_format; #Just for safety but not strictly needed
-          $path = $outpath;
-
-        }
-      }
-    }
-    elsif($all_formats){
-      throw("No conversion path defined for $format. Cannot acquire $format file for path:\n\t$path\n".
-        'Please select a supported file format or add config and conversion support methods for $format');
-    }
-
-    ### Attempt conversion ###
-    if($can_convert){
-      #This now assumes that if $filter_format is set
-      #convert_${filter_format}_${to_format} provides filter functionality
-
-      if(scalar(@{$conversion_paths{$format}}) != 1){      #already handled process_${format} above
-        #Go through the conversion path backwards
-        #Start at last but one as we have already checked the last above i.e. the target format
-        #or start at 0 if we have $filter_format defined
-        my $start_i = (defined $filter_format) ? 0 : ($#{$conversion_paths{$format}} -1);
-
-        for(my $i = $start_i; $i>=0; $i--){
-          my $from_format = $conversion_paths{$format}->[$i];
-
-          #Test for file here if we are not filtering! Else we will always go through
-          #other formats and potentially redo conversion if we have tidied intermediate files
-          if( (! defined $filter_format) &&
-              (! grep (/^${from_format}$/, keys(%$done_formats)) ) ){
-            my $from_path = $path.".${from_format}";
-
-            if($from_path = check_file($from_path, 'gz', $params)){#we have found the required format
-              $done_formats->{$from_format} = $from_path;
-              #next; #next $x/$to_format as we don't want to force conversion
-            }
-          }
-
-
-          #find the first one which has been done, or if none, assume the first is present
-          if( (grep (/^${from_format}$/, keys(%$done_formats)) ) ||
-              $i == 0){
-            #then convert that to the next, and so on.
-            for(my $x = $i; $x < $#{$conversion_paths{$format}}; $x++){
-              my $to_format   = $conversion_paths{$format}->[$x+1];
-              $from_format    = $conversion_paths{$format}->[$x];
-              my $conv_method = 'convert_'.$from_format.'_to_'.$to_format;
-
-              #Sanity check we can call this
-              if(! ($conv_method = Bio::EnsEMBL::Funcgen::Utils::EFGUtils->can($conv_method))){
-                throw("Cannot call $conv_method for path:\n\t$path\n".
-                  'Please add method or correct conversion path config hash');
-              }
-
-
-              $done_formats->{$to_format} = $conv_method->($path.'.'.$from_format, $params);
-
-              #Remove '.unfitlered' from path for subsequent conversion
-              if(($i==0) &&
-                defined $filter_format){
-                $path =~ s/\.unfiltered$//o;
-              }
-            }
-
-            last; #We have finished with this $conversion_path{format}
-          }
-        }
-
-
-        if($clean_filtered_format && ($format eq $filter_format)){
-          #filter_format is not our target format, so we need to keep going
-          next; #$format
-        }
-        elsif(! $all_formats){  #else we have found the most preferable, yay!
-          last;  #$format
-        }
-      }
-    }
-  } #end foreach my $format
-
-
-  #Now clean $done_formats
-
-  if($clean_filtered_format){
-   #actually delete filtered file here?
-    delete $done_formats->{$filter_format};
-  }
-
-  foreach my $format(keys %$done_formats){
-    #doesn't matter about $all_formats here
-
-    if(! grep(/^${format}$/, @$formats)){
-      delete $done_formats->{$format};
-    }
-  }
-
-  #test we have somethign to return!?
-  #if( scalar(keys %$done_formats) == 0 ){
-  #  throw('Failed to find any '.join(', ', @$formats)." files for path:\n\t$path");
-  #}
-  #don't do this as we may want to test for a filtered file, before attempting a filter
-  #from a different path
-  #This is caught in get_alignment_files_by_InputSet_formats
-
-  return $done_formats;
-}
-
-
-
-#Is validate_checksum going to have problems as files are gunzipped
-#Should validate checksum also handle .gz files i.e. check for entry without .gz, gunzip and validate?
-#Maybe all checksums should be done on gunzipped files
-
-
-#DAMMIT! Part of the filtering is currently done in SAM!!!!
-#Need to fix this so we can drop sam file completely.
-
-#There is a danger that a filter_format maybe specified but a pre_process_method
-#never get called. This will have to be handled in the first convert_method in the path
-#but we could put a method check in place?
-
-
-#All pre_process_$format methods need to handle filter_from_format
-#and should faciliatate filter and sort functions
-#Can we merge this with process_sam_bam?
-#and maintain this as a simple wrapper process_bam, which somply sets output format
-#then we can also have process_sam as another wrapper method
-#This would mean moving $params support to sort_and_filter_sam(process_bam)
-#and also filter_from_format support and generate_checksum
-
-#No this will make unflitered naming mandatory for process_sam!
-
-#Calling pre_process assumes we want to at least convert, filter or just sort
-#Otherwise we can simply just use the file
-#Need to support sort flag. We might not want to sort if we already have a sorted bam
-#Always sort when filtering?
-#
-
-sub process_bam{
-  my ($bam_file, $params) = @_;
-  $params ||= {};
-  assert_ref($params, 'HASH');
-  return process_sam_bam($bam_file, {%$params, output_format => 'bam'});
-}
-
-sub convert_bam_to_sam{
-  my ($bam_file, $params) = @_;
-  $params ||= {};
-  assert_ref($params, 'HASH');
-  return process_sam_bam($bam_file, {%$params, output_format => 'sam'});
-}
-
-#sub process_sam would need to check_file with gz suffix!
-
-
-#Need to implement optional sort_and_filter_sam here?
-
-sub convert_sam_to_bed{
-  my ($sam_file, $params) = @_;
-  my $in_file;
-
-  if(! ($in_file = check_file($sam_file, 'gz', $params)) ){
-    throw("Cannot find file:\n\t$sam_file(.gz)");
-  }
-
-  (my $bed_file = $in_file) =~ s/\.sam(\.gz)*?$/.bed/;
-  run_system_cmd($ENV{EFG_SRC}."/scripts/miscellaneous/sam2bed.pl -uncompressed -1_based -files $in_file");
-
-  if( (exists $params->{checksum}) && $params->{checksum}){
-    write_checksum($bed_file, $params);
-  }
-  
-
-  return $bed_file;
-}
-
-
 sub write_checksum{
-  my ($file_path, $params) = @_;
-  my ($signature_file, $digest_method);
-
-  if(defined $params){
-    assert_ref($params, 'HASH');
-    $signature_file = $params->{signature_file};
-    $digest_method  = $params->{digest_method};
-  }
-
-  $digest_method ||= 'hexdigest';
-  my $md5_sig  = generate_checksum($file_path, $digest_method);
-  my $file_name = fileparse($file_path);
+  my $file_path = shift;
+  my $params    = shift || {};
+  assert_ref($params, 'HASH');
+  
+  my $signature_file = (exists $params->{signature_file}) ? $params->{signature_file} : undef;
+  my $digest_method  = (exists $params->{digest_method})  ? $params->{digest_method}  : undef;
+  my $debug          = (exists $params->{debug})          ? $params->{debug}          : 0;
+  $digest_method   ||= 'hexdigest';
+  my $md5_sig        = generate_checksum($file_path, $digest_method);
+  my $file_name      = fileparse($file_path);
 
   if(! defined $signature_file){
     $signature_file = $file_path.'.CHECKSUM';
+    warn "Defining default signature file as $signature_file\n";
   }
-
+  
+  warn "Writing checksum:\t$md5_sig\t$file_name\nTo signature file:\t$signature_file\n" if $debug;
   my $checksum_row = $md5_sig."\t".$file_name."\t".$digest_method;
 
   #Update or create entry in signature_file
   my $sigfile_row;
+  
   if(-f $signature_file){
-    $sigfile_row = `grep '$file_name' $signature_file` ||
-                    die("Failed to grep checksum signature file:\t$signature_file");
+    warn "Signature file is $signature_file\n" if $debug;
+    
+    $sigfile_row = run_backtick_cmd("grep '$file_name' $signature_file", 1);
+    #no exit flag as grep will return 1 if no results are returned
+    
+    if($?){
+      warn("$sigfile_row\nFailed to grep old checksum from existing signature file:\t$signature_file");
+      $sigfile_row = '';
+    }
   }
 
   if($sigfile_row){ #Update entry
@@ -912,11 +571,11 @@ sub write_checksum{
 
 
 sub generate_checksum{
-  my ($file, $digest_method) = @_;
-  
-  if($file =~ /\.gz$/){
-    throw("It is unsafe to generate checksums for a compressed file:\n\t$file");  
-  }
+  my $file          = shift;
+  my $digest_method = shift;
+  #if($file =~ /\.gz$/){
+    #warn("It is unsafe to generate checksums for a compressed file:\n\t$file");  
+  #}
   
   $digest_method ||= 'hexdigest';
 
@@ -927,10 +586,13 @@ sub generate_checksum{
      'please choose a valid digest method or omit for default hexdigest method');
   }
 
-  open(FILE, $file) or throw("Cannot open file for md5 digest:\t$file");
-  $ctx->addfile(*FILE);
+  #Don't use bareword (FILE) for descriptor as is stored in symbol table for this package
+  #meaning potential interference if FILE is used elsewhere. (PBP 203)
+  open(my $CHK_FILE, '<', $file) or throw("Cannot open file for md5 digest:\t$file\n$!");
+  binmode $CHK_FILE;
+  $ctx->addfile($CHK_FILE);#eval this?
   my $md5_sig = $ctx->$digest_method;
-  close(FILE);
+  close($CHK_FILE);
 
   return $md5_sig;
 }
@@ -938,59 +600,82 @@ sub generate_checksum{
 #assume the format of the file is:
 #checksum_sig\tfilename\tdigestmethod
 
-
 sub validate_checksum{
-  my ($file_path, $params) = @_;
-  my ($signature_file, $digest_method);
-
-  if(defined $params){
-    assert_ref($params, 'HASH');
-    $signature_file = $params->{signature_file};
-    $digest_method  = $params->{digest_method};
+  my $file_path = shift;
+  my $params    = shift || {};
+  assert_ref($params, 'HASH');
+  my $signature_file = (exists $params->{signature_file})    ? $params->{signature_file}    : undef;
+  my $digest_method  = (exists $params->{digest_method})     ? $params->{digest_method}     : undef;
+  my $md5_sig        = (exists $params->{checksum})          ? $params->{checksum}          : undef; 
+  my $md5_optional   = (exists $params->{checksum_optional}) ? $params->{checksum_optional} : undef;
+  my $debug          = (exists $params->{debug})             ? $params->{debug}             : 0;
+  
+  if((defined $signature_file) && (defined $md5_sig)){
+    throw("Params 'signature_file' and 'checksum' are mutually exclusive, please restrict to one");
   }
 
   my $file_name = fileparse($file_path);
 
-  if(! defined $signature_file){
-    $signature_file = $file_path.'.CHECKSUM';
-  }
-
-  if(! -f $signature_file){
-    throw("Failed to find checksum file:\t$signature_file\nPlease specify one as an argument, or create default file");
-  }
-
-  my $checksum_row = `grep -E '[[:space:]]$file_name\[[:space:]]*.*\$' $signature_file` ||
-                      die("Cannot acquire $file_name checksum info from:\t$signature_file");
-  my ($md5_sig, $sig_file_name, $sig_digest_method) = split(/\s+/, $checksum_row);
-
-
-  if((! defined $sig_file_name) ||
-     ($sig_file_name ne $file_name)){
-    throw("Failed to find $file_name entry in checksum signature file:\n\t$signature_file");
-  }
-
-  #default to digest method in file
-  $digest_method     ||= $sig_digest_method;
-  #Also need to account for absent $sig_digest
-  $sig_digest_method ||= $digest_method;
-
-
-  if(defined $sig_digest_method){
-    if($digest_method ne $sig_digest_method){
-    throw("Specified digest method($digest_method) does not match method found in ".
-      "checksum signature file($sig_digest_method):\n\t$file_path\n\t$signature_file");
+  if(! defined $md5_sig){
+    
+    if(! defined $signature_file){ 
+      $signature_file = $file_path.'.CHECKSUM';
+    }
+   
+    if((! -f $signature_file) && 
+       ($signature_file =~ /\.bam.CHECKSUM/o)){
+      warn "!!!!! REMOVE THIS !!!!\nTEMPORARILY CREATING missing MD5 file:\t$signature_file";
+      write_checksum($file_path);         
+    }
+      
+    if(-f $signature_file){
+      my $qtd_file_name = quotemeta($file_name);
+      my $cmd = "grep -E '[[:space:]]+$qtd_file_name\[[:space:]]*.*\$' $signature_file";
+      #warn "Checksum file grep:\t$cmd" if $debug;
+      my $checksum_row = run_backtick_cmd($cmd);
+      #warn "Checksum file row:\t$checksum_row" if $debug;
+      my ($sig_file_name, $sig_digest_method);
+      ($md5_sig, $sig_file_name, $sig_digest_method) = split(/\s+/, $checksum_row);
+  
+      if((! defined $sig_file_name) ||
+         ($sig_file_name ne $file_name)){
+        throw("Failed to find $file_name entry in checksum signature file:".
+          "\n\t$signature_file\nUsing:\t$cmd");
+      }
+    
+      #default to digest method in file
+      $digest_method     ||= $sig_digest_method;
+      #Also need to account for absent $sig_digest
+      $sig_digest_method ||= $digest_method;
+  
+    
+      if(defined $sig_digest_method){
+        if($digest_method ne $sig_digest_method){
+        throw("Specified digest method($digest_method) does not match method found in ".
+          "checksum signature file($sig_digest_method):\n\t$file_path\n\t$signature_file");
+        }
+      }
+      else{
+        warn "Could not find digest method in checksum signature file, assuming $digest_method";
+      }
     }
   }
-  else{
-    warn "Could not find digest method in checksum signature file, assuming $digest_method";
+
+  if(defined $md5_sig){
+    my $new_md5_sig = generate_checksum($file_path, $digest_method);
+    
+    if($md5_sig ne $new_md5_sig){
+      #This could be due to mismatched digest methods?
+      my $msg = 'MD5 checksums do not match:'.
+        "\n\tExpected\t$md5_sig\n\tFound\t\t$new_md5_sig".
+        "\n\tFile:\t\t$file_path";
+      $msg .= "\n\tSignature file:\t$signature_file" if $signature_file;
+      throw($msg);
+    }
   }
-
-  my $new_md5_sig = generate_checksum($file_path, $digest_method);
-
-  if($md5_sig ne $new_md5_sig){
-    #This could be due to mismatched digest methods
-    throw("MD5 ($digest_method) checksum does not match signature file for:".
-      "\n\tFile:\t\t$file_path\nSignature file:\t$signature_file");
+  elsif(! $md5_optional){
+    throw("Failed to find checksum file:\t$signature_file\n".
+          'Please specify one as an argument, create a default file or pass the checksum_optional param');
   }
 
   return $md5_sig;
@@ -1018,7 +703,6 @@ sub get_file_format{
 }
 
 
-
 sub get_month_number{
   my($mon) = @_;
   my %month_nos =(
@@ -1040,12 +724,13 @@ sub get_month_number{
 
 
 sub gunzip_file {
-  my ($self, $filepath) = @_;
+  my $filepath = shift;
   my $was_gzipped = 0;
+ 
 
   if( is_gzipped($filepath) ){
-    system("gunzip $filepath") && throw("Failed to gunzip file:\n$filepath\n$@");
-    $filepath =~ s/\.gz$//;
+    run_system_cmd("gunzip $filepath");
+    $filepath =~ s/\.(?:t){0,1}gz$//;
     $was_gzipped = 1;
   }
 
@@ -1053,29 +738,27 @@ sub gunzip_file {
 }
 
 
+#TODO Change this to use named pipes for the zcat so pipe exit can be caught properly
+#do this in open file, by passing an array of open modes
+
 sub is_bed {
   my $file = shift;
-
-  #Use open_file here!
+  my ($BED_FILE, @line);
 
   if(&is_gzipped($file, 1)){
-
-    open(FILE, "zcat $file 2>&1 |") or throw("Can't open file via zcat:\t$file");
+    open($BED_FILE, "zcat $file 2>&1 |") or throw("Can't open file via zcat:\t$file");
   }
   else{
-    open(FILE, $file) or throw("Can't open file:\t$file");
+    open($BED_FILE, '<', $file) or throw("Can't open file:\t$file");
   }
 
-  my @line;
-  #$verbose =1;
-
-
-  while (<FILE>) {
+  while (<$BED_FILE>) {
     chomp;
     @line = split("\t", $_);
     last;
   }
-  close FILE;
+  
+  close($BED_FILE);
 
   if (scalar @line < 6) {
     #warn "Infile '$file' does not have 6 or more columns. We expect bed format:\t".
@@ -1103,41 +786,51 @@ sub is_bed {
 #Have individual format methods, as this is likely to hit performance
 #would be nive to have a no thro mode, which would return the original value
 
-sub convert_strand_from_bed {
-  my $strand = $_[0];
+sub convert_strand {
+  my $strand = shift;
 
   if(! defined $strand){
    throw('Strand argument is not defined');
   }
 
-  if(! exists $bed_strands{$strand}){
-    throw('Strand argument is not a valid bed strand, should be one of: '.
-      join(' ', keys %bed_strands));
+  if(! exists $strand_syns{$strand}){
+    throw('Strand argument is not a supported strand synonym, should be one of: '.
+      join(' ', keys %strand_syns));
   }
 
-  return $bed_strands{$strand};
+  return $strand_syns{$strand};
 }
 
 
+#This can return true for some file formats which use gzip intenrally
+#but are not valid gzip files e.g. bam
+#Hence we now test for known gzip suffixes
+#Probably need an override flag here
+#changed return type to file suffix, for file name subbing
+
 sub is_gzipped {
-  my ($file, $fail_if_compressed) = @_;
+  my $file               = shift; 
+  my $fail_if_compressed = shift;
+  my $gzip               = 0;
 
   throw ("File does not exist:\t$file") if ! -e $file;
 
-  open(FILE, "file -L $file |")
+  open(my $GZ_FILE, "file -L $file |")
     or throw("Can't execute command 'file' on '$file'");
-  my $file_info = <FILE>;
-  close FILE;
+  my $file_info = <$GZ_FILE>;
+  close($GZ_FILE);
 
-  my $gzip = 0;
 
-  if($file_info =~ /compressed data/){
+  if($file =~ /\.(?:t){0,1}gz$/){
 
-    if($file_info =~ /gzip/){
-      $gzip = 1;
-    }
-    else{
-      throw("File is compressed but not with gzip, please unzip or gzip:\t$file_info");
+    if($file_info =~ /compressed data/){
+
+      if($file_info =~ /gzip/){
+        $gzip = 1;
+      }
+      else{
+        throw("File is compressed but not with gzip, please unzip or gzip:\t$file_info");
+      }
     }
   }
 
@@ -1165,41 +858,28 @@ sub is_sam{
 
 sub mean{
   my $scores = shift;
-
   my $total = 0;
-
-  map $total+= $_, @$scores;
-  my $mean = $total/(scalar(@$scores));
-
-  return $mean;
-
+  map { $total+= $_ } @$scores;
+  return $total / scalar(@$scores);
 }
 
 
-#Sort should always be done in the caller if required
+#todo, add no sort flag, and sort by default?
+#will need to deref to avoidaffecting the the array in the caller
 
 sub median{
-  my ($scores, $sort) = shift;
-
-  return undef if (! @$scores);
-
+  my $scores = shift;
+  return if ! @$scores;
 
   my ($median);
   my $count = scalar(@$scores);
   my $index = $count-1;
-  #need to deal with lines with no results!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+  #need to deal with undefs
   #deal with one score fastest
   return  $scores->[0] if ($count == 1);
 
-
-  if($sort){
-    #This is going to sort the reference here, so will affect
-    #The array in the caller
-    #We need to deref to avoid this
-  }
-
   #taken from Statistics::Descriptive
-  #remeber we're dealing with size starting with 1 but indices starting at 0
+  #remember we're dealing with size starting with 1 but indices starting at 0
 
   if ($count % 2) { #odd number of scores
     $median = $scores->[($index+1)/2];
@@ -1208,12 +888,11 @@ sub median{
     $median = ($scores->[($index)/2] + $scores->[($index/2)+1] ) / 2;
   }
 
-
   return $median;
 }
 
 
-=head2 path_to_namspace
+=head2 path_to_namespace
 
   Arg [1]    : String - Module path
   Example    : my $path = '/my/module.pm';
@@ -1234,10 +913,10 @@ sub median{
 =cut
 
 sub path_to_namespace {
-  my $path = $_[0];
+  my $path = shift;
 
   if(! defined $path){
-   throw('No path argument defined');
+    throw('No path argument defined');
   }
 
   $path =~ s/[\/]+/::/g;
@@ -1246,43 +925,38 @@ sub path_to_namespace {
 }
 
 
+#todo test file exists and is readable/writable first to avoid zombie?
+#todo Use IPC::Open open2/3 for piping? Take list of operators (and list of files e.g. in/out)
+
 sub open_file{
-  my ($file, $operator, $file_permissions) = @_;
+  my $file             = shift;
+  my $operator         = shift || '<';
+  my $file_permissions = shift;
 
-  $operator ||= '<';
-
-  if ($operator !~ /%/) {
-    $operator = "$operator $file";
-  } else {
-    #We have some piping to do
-    $operator = sprintf($operator, $file);
+  if(! defined $file){
+    throw('Must provide a file argument');
   }
 
   #Get dir here and create if not exists
-  my $dir = dirname($file);
-
-  my $mkpath_opts = {verbose => 1};
+  my $dir              = dirname($file);
+  my $mkpath_opts      = {verbose => 1};
   $mkpath_opts->{mode} = $file_permissions if defined $file_permissions;
 
+  if((! -d $dir) && 
+     ($operator eq '>')){
 
-  if(! -d $dir){
-    eval { make_path($dir, $mkpath_opts) };
-
-    if($@){
+    if(! eval { make_path($dir, $mkpath_opts); 1 }){
       throw("Failed to make_path:\t$dir\n$@");
     }
   }
 
-  #my $fh;
+  if ($operator !~ /%/) {
+    $operator = "$operator $file";
+  } else { #We have some piping to do
+    $operator = sprintf($operator, $file);
+  }
 
-  #Test exists and is readable/writable first to avoid zombie?
-
-  my $fh = new FileHandle "$operator";
-  #warn "operator is $operator";
-
-  #open(my $fh, $operator) or die("Failed to open:\t$operator");
-
-
+  my $fh = FileHandle->new($operator);
 
   #This does not catch errors when piping then redirecting
   #as the progam will have opened sucessfully
@@ -1291,19 +965,15 @@ sub open_file{
   #won't be caught until we close the file descriptor
   #Which is a little late, and we don't catch error codes on close yet
 
-  if (! defined $fh) {
-    croak("Failed to open $operator");
-  }
-
   #it maybe better to use PerlIO libs here e.g. PerlIO::gzip
-
+  confess("Failed to open $operator") if ! defined $fh;
 
   #Have to chmod here as umask will over-ride permissions passed to FileHandle
   if (defined $file_permissions) {
 
     #Catch non-numeric here as chmod still returns true
     if ($file_permissions =~ /[^0-9]/) {
-      croak("Failed to change $file permissions using:\t$file_permissions");
+      confess("Failed to change $file permissions using:\t$file_permissions");
     }
 
     #chmod requires a literal octal number e.g. 0775 not '0775'
@@ -1314,7 +984,7 @@ sub open_file{
 
     #eval will treat octal number and string as true octal number
     #else will pass non-octal string/number which we can't catch
-    chmod(eval($file_permissions), $file);
+    chmod(eval{$file_permissions}, $file);
   }
 
   return $fh;
@@ -1323,7 +993,7 @@ sub open_file{
 
 
 sub parse_DB_url {
-  my $url = $_[0];
+  my $url = shift;
 
   my ($dbtype, $user, $pass, $host, $dbname, $port);
 
@@ -1365,10 +1035,24 @@ sub parse_DB_url {
 #Would be nice to catch warn output also, but system doesn not handle this well and would
 #to redirect STDERR to a file to read back in. 
 
+
+#These are currently not capturing STDERR and so this is not reported in the
+#throw. It is necessary to inspect the STDERR file to see these, which is a slight
+#problem with the hive which will only list the API throw string, not the actual
+#external error
+
+#Need to use IPC::Open3
+#http://learn.perl.org/faq/perlfaq8.html#How-can-I-capture-STDERR-from-an-external-command-
+
+#Should reset $? here too? In case we want to handle that in the caller
+#Although this is returned after bit shifting
+
 sub run_system_cmd{
   my ($command, $no_exit) = @_;
-  my $exit_status = system($command);#don't nest below, as this may cause problems with $!
-  return _handle_exit_status($command, $exit_status, $!, $no_exit);
+  #$exit_status is same as $? i.e. $CHILD_ERROR
+  #my $exit_status = system($command);#don't nest below, as this may cause problems with $!
+  system($command);
+  return _handle_exit_status($command, $?, $!, $no_exit);
 }
 
 
@@ -1389,52 +1073,89 @@ sub run_system_cmd{
 
 ################################################################################
 
+
+#todo Use IPC::Open3 instead of backtick here
+#Although we are handling exit codes, this will allow us
+#to capture STDOUT and STDERR sepatately
+#http://search.cpan.org/dist/Perl-Critic/lib/Perl/Critic/Policy/InputOutput/ProhibitBacktickOperators.pm
+
+#remove $@ from here, this is only for perl evals?
+#remove $! from here as this is only set by system or library calls?
+
 sub run_backtick_cmd{
   my $command = shift;
-  
+  my $no_exit = shift;
   my (@results, $result);
   
   if(wantarray){
+    #perlcritic(3) suggests this 3 statement map should be subbed out
+    #@results = map {my $line = $_; chomp $line; $line} `$command`;
+    #This is substantially faster
     @results = `$command`;
   }
   else{
-    $result  = `$command`;
+    $result  = `$command`;  
   }
   
-  _handle_exit_status($command, $?, $!); 
-  return wantarray ? @results : $result;
+  my $exit_status = $?; #$CHILD_ERROR
+  #my $errno       = $!; 
+  _handle_exit_status($command, $exit_status, $!, $no_exit); 
+  $? = $exit_status if $no_exit;
+  #Non-local 'Magic' $? assignment is a perlcritic severity 4 warning. 
+  #But we actually want this 'global' behaviour 
+   
+  if(wantarray){
+    chomp(@results); 
+    return @results ; 
+  }
+  else{
+    chomp($result);
+    return $result;
+  }
 }
+
+
+#This is currently not capturing error output very well.
+#If we are running a script, the error message from the script 
+#(and whatever binary it is running) is not captured
+#Meaning Running scripts from script can mean errors go missing.
+#use IPC::Run instead of system? But this is not a core module!
+#IPC::Cmd is available in 5.12 but not 5.10 Grr!
 
 sub _handle_exit_status{
   my ($cmd, $exit_status, $errno, $no_exit) = @_;
+  my ($exit_code, $err_string);
   
-  my $exit_code = $exit_status >> 8; #get the true exit code
+  if ($cmd =~ /\|/){
+    warn "Failed piped commands may not be caught:\n$cmd\n";    
+  }
+
+  $exit_code = $exit_status >> 8; #get the true exit code
   
   if ($exit_status == -1) {
-    warn "Failed to execute. Error:\t$errno\n";
+    $err_string = "Failed to execute:\t$cmd\nError:\t$errno\n";
   }
   elsif ($exit_status & 127) {
-    warn sprintf("Child process died with signal %d, %s coredump\nError:\t$errno",
-                 ($exit_status & 127),
-                 ($exit_status & 128) ? 'with' : 'without');
+    $err_string = sprintf("Child process died with signal %d, %s coredump\n$cmd\nError:\t$errno\n",
+                    ($exit_status & 127),
+                    ($exit_status & 128) ? 'with' : 'without');
   }
   elsif($exit_status != 0) {
-    warn sprintf("Child process exited with value %d\nError:\t$errno\n", $exit_code);  
+    #$cmd may contain sprintf symbols here we need to escape
+    $err_string = sprintf("Child process exited with value %d:", $exit_code)."\t$cmd\nError:\t$errno\n";
   }
-
-  if ($exit_code != 0){
-
-    if (! $no_exit){
-      throw("System command failed:\t$cmd");
-    }
+  
+  if(defined $err_string){
+    if(! $no_exit){
+      throw($err_string);
+    }   
     else{
-      warn("System command returned non-zero exit code:\t$cmd");
+      warn $err_string;  
     }
   }
-
+  
   return $exit_code;
 }
-
 
 
 =head2 scalars_to_objects
@@ -1442,7 +1163,8 @@ sub _handle_exit_status{
   Arg [1]    : Bio::EnsEMBL::Funcgen::DBSQL::DBAdaptor
   Arg [2]    : String - class name of object to retrieve
   Arg [3]    : String - method name to use
-  Arg [4]    : Arrayref - Scalar arguments to use iteratively with the fetch method
+  Arg [4]    : Arrayref - Scalar arguments to use iteratively with the fetch method.
+               A single scalar can also be passed in a scalar context.
   Example    : my @cell_types = @{scalars_to_object($db, 'CellType',
                                                     'fetch_by_name',
                                                     [ qw ( GM06990 HUVEC H1ESC ) ])};
@@ -1465,6 +1187,12 @@ sub _handle_exit_status{
 sub scalars_to_objects{
   my ($db, $class_name, $fetch_method, $scalars) = @_;
   assert_ref($db, 'Bio::EnsEMBL::Funcgen::DBSQL::DBAdaptor', 'db');
+
+  #Be kind and handle single scalars in scalar context
+  if(defined $scalars && 
+     (! ref($scalars)) ){
+    $scalars = [$scalars];     
+  }
 
   if(! ((defined $scalars && (ref($scalars) eq 'ARRAY')) &&
          defined $class_name &&
@@ -1494,306 +1222,6 @@ sub scalars_to_objects{
   }
 
   return \@objs;
-}
-
-
-#todo
-# 1 add support for filter config i.e. which seq_regions to filter in/out
-# 2 Sorted but unfiltered and unconverted files may cause name clash here
-#   Handle this in caller outside of EFGUtils, by setting out_file appropriately
-# 3 add a DESTROY method to remove any tmp sorted files which may persist after an
-#   ungraceful exit. These can be added to a global $main::files_to_delete array
-#   which should then also be undef'd in DESTROY so they don't persisnt to another instance
-
-#This warning occurs when only filtering bam to bam:
-#[bam_header_read] EOF marker is absent. The input is probably truncated.
-#This is not fatal, and not caught. Does not occur when filtering with sort
-#maybe we shoudl also be catchign $@ after samtools view -H $in_file?
-
-
-#We could use the existing Bio::SamTools package but:
-#1 This will add an extra requirement
-#2 This will need to be isolated in a hive/analysis only module
-#3 It doesn't appear to support merge operations
-#4 It wouldn't support the piping/greping we do to filter the data
-
-#support sam input here
-#also separate this into merge_sam_bam
-#and merge_sam_bam_cmd
-#then we can use this to grab the pipe command and have 1 place for the sort/merge code
-
-#move to Utils::SamUtils?
-
-
-#Can we return the number of duplicates removes?
-
-sub merge_bams{
-  my $outfile = shift;
-  my $bams    = shift;
-  my $params  = shift;  
-  
-  if(! defined $outfile){
-    throw('Output file argument is not defined');  
-  }
-  elsif($outfile !~ /\.(bam|sam)$/o){
-    throw('Output file argument must have a sam or bam file suffix');    
-  }
-  
-  my $out_flag = ($1 eq 'bam') ? 'b' : '';
-
-  #validate/convert inputs here?
-  #just assume all are bam for now
-  
-  $params ||= {};
-  assert_ref($params, 'HASH');
-  my $sort    = $params->{sort}              if exists $params->{sort};
-  my $rm_dups = $params->{remove_duplicates} if exists $params->{remove_duplicates};
-  
-  my $header_opt = '';
-  
-  if (exists $params->{sam_header}){
-    $header_opt = ' -h '.$params->{sam_header};
-  } 
-  
-  #Assume files are already sorted but support optional sort
-  
-  my $cmd;
-  
-  if(defined $sort){
-    throw('Not implemented sort yet');  
-    # my $sorted_prefix = $tmp_bam.".sorted_$$";
-    #$tmp_bam .= ($sort) ? ".sorted_$$.bam" : '.tmp.bam';
-    #$cmd .= ' | samtools view -uShb - ';  #simply convert to bam using infile header
-    #$cmd .= ($sort) ? ' | samtools sort - '.$sorted_prefix : ' > '.$tmp_bam;
-  }
- 
-  #samtools merge [-nur1f] [-h inh.sam] [-R reg] <out.bam> <in1.bam> <in2.bam> [...]
-  #we are no longer attempting to use a header file, as this is not the same as the fasta_fai 
-  #file and bam should have integrated and matching headers at this point
- 
-  #$cmd = "samtools merge -u ${outfile}.inc_dups ".join(' ', @$bams);
-  #run_system_cmd($cmd);
-  
-  #Does merge support - for STDOUT
-  #-u uncompressed output for pipe
-  #-f force overwrite output
-  $cmd  = 'samtools merge -u - '.join(' ', @$bams).' | '; 
-  $cmd .= 'samtools rmdup -s - - |' if $rm_dups;
-  $cmd .= "samtools view -h${out_flag} - > $outfile";
-  #does rmdup support '-' for STDIN STDOUT piping ?
-  #piping like this may cause errors downstream of the pipe not to be caught
-  #could we try doing an open on the piped cmd to try and catch a SIGPIPE?
-  run_system_cmd($cmd);
-  
-  return;
-}
-
-#Utils::SamUtils?
-
-#change this to use $params for fasta_fai?
-
-#This is header list, not in sam/bam format header
-
-sub _validate_sam_fai {
-  my $sam_bam_file = shift;
-  my $fasta_fai    = shift;
-  
-  #do not check file again here ad this is private and should have been done already
-  
-  my $fasta_fai_opt;
-
-  if (defined $fasta_fai) {
-    validate_path($fasta_fai);     $fasta_fai_opt = " -t $fasta_fai ";
-    #-t spec is now optional, as not integrating the header into each file
-    #is risky as it could get regenerated and be mismatched
-    #which may produce unpredicatable behaviour or faults if the header
-    #doesn't match the data.
-  }
-  
-  my ($fai_header, $in_file_header);
-
-  eval { $in_file_header = `samtools view -H $sam_bam_file` };
-  #$! not $@ here which will be null string
-
-  if($!){
-
-    if(! defined $fasta_fai){
-      throw("Could not find an in file header or a sam_ref_fai for:\t$sam_bam_file$!");
-    }
-  }
-  elsif(defined $fasta_fai){
-    $fai_header = `samtools view -H $fasta_fai_opt $sam_bam_file`;
-
-    if($!){
-      throw("Failed to identify view valid header from:\t$fasta_fai\n$!");
-    }
-
-    #Just make sure they are the same
-    if($fai_header ne $in_file_header){
-      warn("CHANGE THIS TO A THROW WHEN WE HAVE FINISHED DEV! Found mismatched infile and fai headers for:\n\t$sam_bam_file\n\t$fasta_fai");
-      #should this throw or just default to in file?
-      #shoudl probably give the options to reheader and sub out this whole compare_sam_header thing
-      #reheader mode, would that all old @SQ are present in new fai header?
-      #can we get the header form the fai by simply providing an empty file?
-      #cat '' | samtools view -HSt fasta.fai -
-    }
-
-    #we don't need the header file as we have the correct infile header
-    $fasta_fai_opt = '';
-  }
-  
-  return $fasta_fai_opt;
-}
-
-sub process_sam_bam {
-  my $sam_bam_path = shift;
-  my $params       = shift;
-  my $in_file;
-
-  if(! ($in_file = check_file($sam_bam_path, undef, $params)) ){
-    throw("Cannot find file:\n\t$sam_bam_path");
-  }
-
-  $params ||= {};
-  assert_ref($params, 'HASH');
-  my $out_file      = $params->{out_file}           if exists $params->{out_file};
-  my $sort          = $params->{sort}               if exists $params->{sort};
-  my $filter_format = $params->{filter_from_format} if exists $params->{filter_from_format};
-  my $fasta_fai     = $params->{ref_fai}            if exists $params->{ref_fai};
-  my $out_format    = $params->{output_format}      if exists $params->{output_format};
-  $out_format     ||= 'sam';
-
-
-  #sam defaults
-  my $in_format = 'sam';
-  my $out_flag   = '';
-  my $in_flag   = 'S';
-
-  if($out_format eq 'bam'){
-    $out_flag = 'b';
-  }
-  elsif($out_format ne 'sam'){
-    throw("$out_format is not a valid samtools output format");
-  }
-
-  if($in_file =~ /\.bam$/o){     # bam (not gzipped!)
-    $in_format = 'bam';
-    $in_flag   = '';
-  }
-  elsif($in_file !~ /\.sam(\.gz)*?$/o){ # sam (maybe gzipped)
-    throw("Unrecognised sam/bam file:\t".$in_file);
-  }
-
-  #This is odd, we really only need a flag here
-  #but we already have the filter_from_format in the params
-  if(defined $filter_format &&
-     ($filter_format ne $in_format) ){
-    throw("Input filter_from_format($filter_format) does not match input file:\n\t$in_file");
-  }
-
-
-  if(! $out_file){
-    ($out_file = $in_file) =~ s/\.${in_format}(.gz)*?$/.${out_format}/;
-
-    if(defined $filter_format){
-      $out_file =~ s/\.unfiltered//o;  #This needs doing only if is not defined
-    }
-  }
-
-  #Sanity checks
-  (my $unzipped_source = $in_file) =~ s/\.gz$//o;
-  (my $unzipped_target = $out_file)     =~ s/\.gz$//o;
-
-  if($unzipped_source eq $unzipped_target){
-    #This won't catch .gz difference
-    #so we may have an filtered file which matches the in file except for .gz in the infile
-    throw("Input and output (unzipped) files are not allowed to match:\n\t$in_file");
-  }
-
-  if($filter_format){
-
-    if($in_file !~ /unfiltered/o){
-      warn("Filter flag is set but input file name does not contain 'unfiltered':\n\t$in_file");
-    }
-
-    if($out_file =~ /unfiltered/o){
-      throw("Filter flag is set but output files contains 'unfiltered':\n\t$in_file");
-    }
-  }
-  elsif(! $sort &&
-        ($in_format eq $out_format) ){
-    throw("Parameters would result in no change for:\n\t$in_file");
-  }
-
-
-  #Could do all of this with samtools view?
-  #Will fail if header is absent and $fasta_fai not specified
-  #$fasta_fai is ignored if infile header present
-  #Doing it like this would integrate the fai into the output file, which is probably what we want?
-  #This would also catch the absent header in the first command rather than further down the pipe
-  #chain which will not becaught gracefully
-
-  #This can result in mismatched headers, as it does seem like the fai file is used rather than the in file header
-  #here, at least for bams
-
-
-
-  my $fasta_fai_opt = _validate_sam_bam_header($in_file, $fasta_fai);
-  my $cmd = "samtools view -h${in_flag} $fasta_fai_opt $in_file "; # Incorporate header into file
-
-  if($filter_format){
-    $cmd .= "-F 4 | ". #-F Skip alignments with bit set in flag (4 = unaligned)
-    " grep -vE '^[^[:space:]]+[[:blank:]][^[:space:]]+[[:blank:]][^[:space:]]+\:[^[:space:]]+\:MT\:' ". #Filter MTs
-    " | grep -v '^MT' | grep -v '^chrM' ";                                                              #Filter more MTs
-  }
-
-  #-u uncompressed bam (as we are piping)
-  #-S SAM input
-  #-t  header file (could omit this if it is integrated into the sam/bam?)
-  #- (dash) here is placeholder for STDIN (as samtools doesn't fully support piping).
-  #This is interpreted by bash but probably better to specify /dev/stdin?
-  #for clarity and as some programs can treat is as STDOUT or anything else?
-  #-b output is bam
-  (my $tmp_bam = $in_file) =~ s/\.$in_format//;
-  my $sorted_prefix = $tmp_bam.".sorted_$$";
-  $tmp_bam .= ($sort) ? ".sorted_$$.bam" : '.tmp.bam';
-
-  #-m 2000000 (don't use 2G here,a s G is just ignored and 2k is used, resulting in millions of tmp files)
-  #do we need an -m spec here for speed? Probably better to throttle this so jobs are predictable on the farm
-  #We could also test the sorted flag before doing this?
-  #But samtools sort does not set it (not in the spec)!
-  #samtools view -H unsort.bam
-  #@HD    VN:1.0    SO:unsorted
-  #samtools view -H sort.bam
-  #@HD    VN:1.0    SO:coordinate
-  #We could add it here, but VN is mandatory and we don't know the version of the sam format being used?
-  #bwa doesn't seem to output the HD field, not do the docs suggest which spec is used for a given version
-  #mailed Heng Lee regarding this
-  $cmd .= ' | samtools view -uShb - ';  #simply convert to bam using infile header
-  $cmd .= ($sort) ? ' | samtools sort - '.$sorted_prefix : ' > '.$tmp_bam;
-  #warn $cmd;
-  run_system_cmd($cmd);
-
-  #Add a remove duplicates step
-  #-s single end reads or samse (default is paired, sampe)
-  #Do this after alignment as we expect multiple reads if they map across several loci
-  #but not necessarily at exactly the same loci which indicates PCR bias
-  if($filter_format){
-    $cmd = "samtools rmdup -s $tmp_bam - | ".
-      "samtools view -h${out_flag} - > $out_file";
-  }else{
-    $cmd = "samtools view -h${out_flag} $tmp_bam > $out_file";
-  }
-
-  #warn $cmd;
-  run_system_cmd($cmd);
-  run_system_cmd("rm -f $tmp_bam");
-
-  if( (exists $params->{checksum}) && $params->{checksum}){
-    write_checksum($out_file, $params);
-  }
-
-  return $out_file;
 }
 
 
@@ -1855,6 +1283,14 @@ sub species_name{
   return $species_names{uc($species)};
 }
 
+#returns array
+
+sub split_CamelCase{
+  my $string = shift || die('Must provide a CamelCase string to split');
+  #I'd like to thank google and salva  
+  #This will simply drop any non-letter characters
+  return $string =~ /[A-Z](?:[A-Z]+|[a-z]*)(?=$|[A-Z])/g;
+}
 
 
 #These subs are useful for implementing
@@ -1879,8 +1315,8 @@ sub strip_param_args{
 
 	  ($param_name = $args->[$i]) =~ s/^[-]+//;
 
-	  if(grep/^${param_name}$/, @strip_params){
-		$seen_opt = 1;
+	  if( grep { /^${param_name}$/ } @strip_params){
+		  $seen_opt = 1;
 	  }
 	}
 
@@ -1897,19 +1333,52 @@ sub strip_param_args{
 
 sub strip_param_flags{
   my ($args, @strip_params) = @_;
-
-  my @args = @$args;
+  my @args;
 
   foreach my $flag(@strip_params){
-	@args = grep(!/[-]+${flag}$/, @args);
+	  push @args, grep { !/[-]+${flag}$/ } @$args;
   }
 
   return \@args;
 }
 
 
+sub add_DB_url_to_meta {
+  my $url_type = shift;
+  my $url      = shift;
+  my $db       = shift;
+  
+  if(! defined $url_type){
+    throw('Must provide URL_TYPE, URL and DBAdaptor arguments');
+  }
+  parse_DB_url($url);
+  assert_ref($db, 'Bio::EnsEMBL::DBSQL::DBAdaptor', 'db');#restrict this to Funcgen?
+
+  my $mc         = $db->get_MetaContainer;
+  my $meta_key = $url_type.'_url';
+  my $meta_value = $mc->single_value_by_key($meta_key);
+
+  if( ! defined $meta_value){ #Store the new meta entry
+    #Add key via API to store with appropriate species_id
+
+    if(! eval { $mc->store_key_value($meta_key, $url); 1}){
+      throw("Failed to store hive url meta entry:\t$meta_key\t$url\n$@");
+    }
+  }
+  elsif($meta_value ne $url){
+    throw("Could not set $meta_key meta entry:\t".$url."\nAs ".$db->dbc->dbname.
+      " is currently locked to a different hive DB:\t$meta_value\n".
+      'Please use that hive DB or drop that pipeline, or remove the meta entry');
+  }
+  #else meta values match and all is good.
+
+  return;
+}
+
+
+
 sub url_from_DB_params {
-  my $db_params = $_[0];
+  my $db_params = shift;
 
   my $host   = (exists $db_params->{'-host'})   ? $db_params->{'-host'} :
     throw('Missing mandatory -host paramter in DB parameters hash');
@@ -1927,9 +1396,16 @@ sub url_from_DB_params {
 #Very simple method to check for a file and it's compressed variants
 #This may cause problems if the $file_path is already .gz
 
-sub check_file{
-  my ($file_path, $suffix, $params) = @_;
+#todo tidy up suffix handling, will it ever be anything other than .gz?
 
+
+# To run on checksum validation simply define the checksum param
+#to the expected checksum or undef if we want to read from a sig file
+
+sub check_file{
+  my $file_path = shift;
+  my $suffix    = shift;
+  my $params    = shift;
   my $found_path;
 
   if(-f $file_path){
@@ -1937,7 +1413,8 @@ sub check_file{
   }
   elsif(defined $suffix){
     
-    if($file_path =~ /\.${suffix}/o){
+    if($file_path =~ /\.${suffix}/o){ #check without first
+      #Just incase it was already in the $file_path
       $file_path =~ s/\.${suffix}$//;
       
       if(-f $file_path){
@@ -1945,27 +1422,29 @@ sub check_file{
       }
     }
     elsif(-f $file_path.'.'.$suffix){
-      gunzip_file($file_path.'.'.$suffix);
-      $found_path = $file_path;    
+      $found_path =  $file_path.'.'.$suffix
     }
   }
-    
 
   if($found_path){
-    my $validate_checksum;
+
+    if($params->{gunzip} && 
+       ($found_path =~ /\.gz$/o)){          
+      $found_path = gunzip_file($found_path);  
+    }
 
     if(defined $params){
       assert_ref($params, 'HASH');
-      $validate_checksum = (exists $params->{checksum}) ? $params->{checksum} : undef;
-    }
-
-    if($validate_checksum){
-      validate_checksum($found_path, $params);
+      
+      if(exists $params->{checksum}){
+        validate_checksum($found_path, $params);  
+      }
     }
   }
 
   return $found_path;
 }
+
 
 sub validate_path{
   my ($path, $create, $is_dir, $alt_root) = @_;
@@ -2042,9 +1521,7 @@ sub validate_path{
   elsif($is_dir && $create){
       #print STDOUT "Creating${label}:\n\t$path\n";
 
-    eval { make_path($path) };
-
-    if($@){
+    if(! eval { make_path($path); 1 }){
       throw("Unable to create:\n\t$path\n$@");
     }
   }
@@ -2055,8 +1532,178 @@ sub validate_path{
   return $path;
 }
 
-#Funcgen added methods
 
+
+# Move some of these to SetUtils?
+
+
+
+#Is this really needed, could this not just be replaced with
+#my @controls = grep { $_->is_control == 1 } @{$set->get_support};
+#and test in caller, which is probably better?
+
+#This also assumes InputSubset input if not ResultSet?!
+#This arbitrarily returns the first, no all
+
+
+#If this is just used for getting the control feature type, then we can probably to that all at once?
+#and make this private?
+
+#control experiment is now being handles by ResultSet itself
+#should probably move feature_type method to ResultSet too
+
+sub _get_a_control_InputSubset{
+  my $set  = shift; 
+  my @is_sets;
+  
+  if( $set->isa('Bio::EnsEMBL::Funcgen::ResultSet') ){
+    #Enforce input_subset table_name here
+    
+    @is_sets = @{$set->get_support};
+  
+    if(! @is_sets){
+      throw("Failed to identify control InputSubset support for ResultSet:\t".$set->name);  
+    }
+  }
+  else{
+    @is_sets = ($set);
+  }
+  
+  my @ctrls = grep { $_->is_control == 1 } @is_sets;
+
+  if(! @ctrls){
+    throw('Could not identify a control InputSubset from '.ref($set).":\t".$set->name);  
+  }
+
+  return $ctrls[0];
+}
+  
+#This may cause uncaught exception if there are no controls and 
+#the caller does not test the return  
+#Assumes is ResultSet with table_name input_subset
+sub _get_control_InputSubsets{
+  my $set = shift;
+  return [ grep { $_->is_control == 1 } @{$set->get_support} ];  
+}
+
+
+#Should this conditionally append the analysis?
+#This is only useful if your want to omit the _TRN 
+#suffix.
+
+
+sub get_set_prefix_from_Set{
+  my $set        = shift;
+  my $control    = shift; 
+  my $study_name = get_study_name_from_Set($set, $control);
+ 
+  if(! (ref($set) && 
+        ($set->isa('Bio::EnsEMBL::Funcgen::InputSubset') ||
+         $set->isa('Bio::EnsEMBL::Funcgen::ResultSet') ))){
+    throw('Must pass a valid InputSet or ResultSet');         
+  }
+  
+  my $ftype;
+  
+  if($control){
+    $ftype = _get_a_control_InputSubset($set)->feature_type->name;
+  }
+  else{
+     $ftype = $set->feature_type->name;
+  }
+ 
+  return $set->cell_type->name.'_'.$ftype.'_'.$study_name; 
+}
+
+#This currently only works for Experiments
+#which have controls mixed in
+    
+#The pipeline does not currently expect 
+#stand alone control experiments
+#and will try and process these like a mixed signal/control set.
+#This should be fine until after the alignment
+#at which point we want to stop their processing
+    
+sub get_study_name_from_Set {
+  my $set     = shift;
+  my $control = shift;
+  
+  if(! (ref($set) && 
+        ($set->isa('Bio::EnsEMBL::Funcgen::InputSubset') ||
+         $set->isa('Bio::EnsEMBL::Funcgen::ResultSet') ))){
+    throw('Must pass a valid InputSet or ResultSet');         
+  }
+  
+  my ($exp_name, $ftype);
+  my $ctype = $set->cell_type->name;
+  
+  if($control){
+    $control = _get_a_control_InputSubset($set);
+    #This is based on the assumption that all non-ctrl subsets are associated with a unique Experiment.
+    my $exp   = $control->experiment;
+    $exp_name = $exp->name;
+ 
+    foreach my $isset(@{$exp->get_InputSubsets}){
+      
+      if(! $isset->is_control){
+        $ftype = $isset->feature_type->name;  
+        last;
+      }  
+    }
+    
+    if(! $ftype){   #We have a pure control experiment i.e. no signal InputSubsets
+     $ftype = $exp->feature_type->name;
+    }      
+  }
+  else{  
+    $exp_name = $set->experiment->name ||
+      throw('Cannot find unique experiment name for '.ref($set).":\t".$set->name);
+    $ftype = $set->feature_type->name;
+  }
+  
+  #\Q..\E escape mata characters in string variables 
+  (my $study_name = $exp_name) =~ s/\Q${ctype}_${ftype}\E_(.*)/$1/i;
+  
+  if($study_name eq $exp_name){
+    throw("Failed to create study name for Experiment $exp_name with cell type $ctype and feature type $ftype");  
+  }
+  
+  return $study_name;
+}
+
+#This will also take a namespace
+
+sub validate_package_path{
+  my $pkg_path = shift ||  throw('Must defined a package path to validate');  
+ 
+  #Quote so eval treats $aln_pkg as BAREWORD and converts :: to /
+  if(! eval "{require $pkg_path; 1}" ){ 
+    throw( "Failed to require:\t$pkg_path\n$@" );
+  }
+  
+  #This might not always be correct if the file contains >1 package
+  return path_to_namespace($pkg_path);
+}
+
+#This is to get around the problem that some scripts are not available in the top level of the $PATH dirs
+#and creating a toplevel link is not appropriate as we need there full path.
+
+#Shouldn't call this on a full path as will fail and take a long time about it
+#Also,  we already know the location!
+
+sub which_path{
+  my $filename  = shift;
+  my @env_paths = split(/:/, $ENV{PATH});
+  my $path;
+   
+  find(sub{ if ($_ eq $filename){$path=$File::Find::name; return; }}, @env_paths);
+  
+  if(! defined $path){
+    throw("Unable to find file in \$PATH:\t$filename\n\$PATH contains:\t".join("\t", @env_paths));
+  }
+  
+  return $path;
+}
 
 
 1;

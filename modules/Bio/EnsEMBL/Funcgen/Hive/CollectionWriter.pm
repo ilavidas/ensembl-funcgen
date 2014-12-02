@@ -14,8 +14,8 @@ use base ('Bio::EnsEMBL::Funcgen::Hive::BaseImporter');
 
 use warnings;
 use strict;
-use Bio::EnsEMBL::Funcgen::Utils::EFGUtils qw( generate_slices_from_names
-                                               get_feature_file ); 
+use Bio::EnsEMBL::Funcgen::Utils::EFGUtils qw( generate_slices_from_names );
+                                        
                                                #strip_param_args strip_param_flags run_system_cmd);
 use Bio::EnsEMBL::Utils::Exception qw(throw);
 
@@ -31,26 +31,27 @@ $main::_no_log = 1;
 #output_dir  This is a generic over ride for the default output dir
 
 #todo
-#default set up is that alignment will have already done the filter from bam
-#hence we woudl need to set the filter_from_format param if we ever want to change this
+#1 default set up is that alignment will have already done the filter from bam
+#  hence we woudl need to set the filter_from_format param if we ever want to change this
+#2 Move a lot of the fetch_input_code to run
+
 
 sub fetch_input {   # fetch parameters...
   my $self = shift;
-  $self->SUPER::fetch_input;  
-  
-  $self->helper->debug(1, "CollectionWriter::fetch_input after SUPER::fetch_input");
+  #Set some module defaults
+  $self->param('disconnect_if_idle', 1);
 
-
-   
+  $self->SUPER::fetch_input;    
+  $self->helper->debug(1, "CollectionWriter::fetch_input after SUPER::fetch_input");  
   my $rset = $self->fetch_Set_input('ResultSet');
   $self->helper->debug(1, "CollectionWriter::fetch_input got ResultSet:\t".$rset);
   
-  #my $input_sets = $rset->get_support;  
-   
-  #if(scalar(@$input_sets) != 1){
-  #  throw('Expected 1 InputSet, found '.scalar(@$input_sets).
-  #    ' for ResultSet '.$rset->name);   
-  #}
+ 
+  $self->init_branching_by_analysis;  #Set up the branch config
+  my $ftype_name = $rset->feature_type->name;
+ 
+
+  
   
   $self->get_output_work_dir_methods($self->db_output_dir.'/result_feature/'.$rset->name, 1);#no work dir?
   #todo enable use of work dir in get_alignment_file_by_InputSet and Importer
@@ -75,21 +76,77 @@ sub fetch_input {   # fetch parameters...
   #Can we update -input_files in the Importer after we have created it?
   
   
-  #We want to filter by default, unless bam_filtered has been specified?
-  #bam_filtered will need batchflowing from alignment pipeline
-  my $filter_format = $self->param_silent('bam_filtered') ? undef : 'bam';  
+  #Hack to add in states that were missed in DefineResultSets
+  $rset->adaptor->store_status('ALIGNED', $rset);
   
-     
-  my $align_files = $self->get_alignment_files_by_ResultSet_formats($rset,
-                                                                    $self->param_required('feature_formats'),
-                                                                    undef, #control flag
-                                                                    1,     #all formats
-                                                                    $filter_format); 
-  #No need to check as we have all_formats defined
+  if($self->FeatureSet->analysis->program eq 'CCAT'){
+    #throw('Need to implement control preprocessing for CCAT');  
+    
+    my $exp = $rset->experiment(1);#ctrl flag
+    #But only in PreprocessAlignments no in WriteCollections 
+    
+    if(! $exp->has_status('CONTROL_CONVERTED_TO_BED')){
+      #Make this status specific for now, just in case
+    
+      if($exp->has_status('CONVERTING_CONTROL_TO_BED')){
+         $self->input_job->transient_error(0); #So we don't retry  
+          #Would be nice to set a retry delay of 60 mins
+          throw($exp->name.' is in the CONVERTING_CONTROL_TO_BED state, another job may already be converting these controls'.
+            "\nPlease wait until ".$exp->name.' has the CONTROL_CONVERTED_TO_BED status before resubmitting this job');
+      }
+      else{
+        #Potential race condition here will fail on store
+        $exp->adaptor->store_status('CONVERTING_CONTROL_TO_BED', $exp); 
+       
+        $self->get_alignment_files_by_ResultSet_formats($rset,
+                                                        ['bed'],
+                                                        1); #control flag
+      
+        #todo check success of this in case another job has pipped us
+        $exp->adaptor->store_status('CONTROL_CONVERTED_TO_BED',   $exp); 
+        $exp->adaptor->revoke_status('CONVERTING_CONTROL_TO_BED', $exp, 1);#Validate status flag
+      }   
+    }
+  }
   
-  #what about control files here?
+  
+  #This currently keeps the sam files! Which is caning the lfs quota                                                                    
+  warn "Hardcoded PreprocessAlignments to get bed only, as sam intermediate was eating quota";
+   
+  my $align_files = $self->get_alignment_files_by_ResultSet_formats($rset, ['bed']);
+                                                                #    $self->param_required('feature_formats'),
+                                                                #    undef, #control flag
+                                                                #    1);     #all formats
+                                                                    
+                                                                    
+                                                                    
+                                                                    
+
+                                                                    
+  #No need to check as we have all_formats defined? Shouldn't we just specify bed here?
+  #other formats maybe required for other downstream analyses i.e. peak calls
+  #but we don't know what formats yet
+  #We have to do the conversion here, so we don't get parallel Collection slice jobs trying to do the conversion
+  #todo review this
+   
+  #Now we need to convert the control file for CCAT
+  #This is harcoded and needs revising, can't guarantee this will be grouped by control
+  #at this point, so will have to employ status checking to avoid clashes
+  #This analysis really needs to know the formats required for downstream analyses
+  #These are available via the config, but not the PeakCaller modules themselves
+  #So we will have to hardcode this in the config 
+  
+  #We can't test the filepaths, as 
+  #1 We don't know wether they are finished
+  #2 The code to build the file path is nested in get_alignment_files_by_ResultSet_formats 
+  #  and get_files_by_formats. Probably need a no_convert mode, which just returns what's there
+  #  already
+  
+  #This has to be on the experiment
+  #Let's just do it for all rather than just non-IDR ftypes??
   
   
+ 
   
   
   
@@ -100,18 +157,18 @@ sub fetch_input {   # fetch parameters...
   
 
 
-  $self->new_Importer_params( 
     #Default params, will not over-write new_importer_param
     #which have been dataflowed
-   {
-    #-prepared            => 1, #Will be if derived from BAM in get_alignment_file_by_InputSets
+  $self->new_Importer_params( 
+   {#-prepared            => 1, #Will be if derived from BAM in get_alignment_file_by_InputSets
     #but we aren't extracting the slice names in this process yet
     -input_feature_class => 'result', #todo remove this requirement as we have output_set?
     -format              => 'SEQUENCING',#This needs changing to different types of seq
     -recover             => 1, 
     -force               => 1, #for store_window_bins_by_Slice_Parser
+    -parser              => 'Bed',
     -output_set          => $rset,
-    -input_files         => [$align_files->{'bed'}], #Can we set these after init?
+    -input_files         => [$align_files->{bed}], #Can we set these after init?
     -slices              => &generate_slices_from_names
                               ($self->out_db->dnadb->get_SliceAdaptor, 
                                $self->slices, 
@@ -131,10 +188,6 @@ sub fetch_input {   # fetch parameters...
     $self->param_required('slices');     
   }
   
- 
-  #Finally set up the branch config
-  $self->init_branching_by_analysis;
-      
   return;
 }
 
@@ -147,14 +200,19 @@ sub run {   # Check parameters and do appropriate database/file operations...
    
     if( ! $Imp->prepared ){  #Preparing data...
       $Imp->read_and_import_data('prepare');
-      #Dataflow only jobs for slices that the importe has seen
+      #Dataflow only jobs for slices that the import has seen
       my %seen_slices  = %{$Imp->slice_cache};
+      
+      if(! %seen_slices){
+        $self->throw_no_retry("Found no data after prepare step for:\n\t".
+          join("\n\t", @{$Imp->input_files}));  
+      }
+      
       my $batch_params = $self->batch_params;
       my @slice_jobs = ();
 
       foreach my $slice (values %seen_slices){ 
-   
-        #$self->branch_output_id(
+
         push @slice_jobs,
          {
           %{$batch_params},#-slices will be over-ridden by new_importer_params
@@ -171,24 +229,17 @@ sub run {   # Check parameters and do appropriate database/file operations...
             -batch_job      => 1, 
 	          -prepared       => 1,  
            }
-          };
-          
-         # undef, #No branch key as we know the branch
-         # 2);   
+         };
       }
       
-      
-      #Could really do with flowing ResultSet set_type down one branch
-      #and other set types down other branch?
-      #in case we have not created a DataSet?
-  
-            
+                  
       my $output_id = {%{$batch_params},#-slices will be over-ridden below
                        dbID         => $self->param('dbID'),
                        set_name     => $self->param('set_name'),#mainly for readability
                        set_type     => $self->param('set_type'),
                        filter_from_format => undef,
                        slices             => [keys %seen_slices]
+                       
       }; #Don't want to re-filter for subsequent jobs
                 
       #Deal with Collections and Mergecollection job group first
@@ -196,10 +247,15 @@ sub run {   # Check parameters and do appropriate database/file operations...
       #as it is only dealing with one job group
       #so could have simply branced the funnel jobs after
       #but this makes it more explicit  
-      $self->branch_job_group([2], \@slice_jobs, 1, [$output_id]);
+      
+      #This merge job delete the input for the peak job, this could conceivable do this
+      #before it get a chance to run. V unlikly tho, du eto runtime.
+      #We really need to ad ad a final semaphored job, to do the clean up
+      
+      $self->branch_job_group(2, \@slice_jobs, 1, [{%$output_id, garbage => [$Imp->output_file]}]);
   
       #We have no way of knowing whether method was injected by fetch_Set_input
-      my $fset = $self->FeatureSet;
+      my $fset = $self->FeatureSet;#from fetch_Set_input
       
       #todo
       #Do we need to be able to do this conditionally?
@@ -249,8 +305,7 @@ sub run {   # Check parameters and do appropriate database/file operations...
                                                              1);   
     #set appropriate states...
     my $rset = $self->ResultSet;     
-    $rset->adaptor->set_imported_states_by_Set($rset);
-    
+    $rset->adaptor->set_imported_states_by_Set($rset);  
     #End of this branch & config
   }
 

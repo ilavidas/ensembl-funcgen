@@ -114,7 +114,7 @@ maybe collate output into one file per PWM
 
 =cut
 
-# To do - Some o fthese apply to all the pwm scripts
+# To do - Some of these apply to all the pwm scripts
 # 1 Getopt::Long, remove process_arguments
 # 2 remove backticks in favour of system. Use EFGUtils::run_system_cmd
 # 3 Remove commentary and err subs and flip use STDERR(warn) and STDOUT(print). 
@@ -122,6 +122,12 @@ maybe collate output into one file per PWM
 # 4 DONE fastaclean path? Now append path belowb
 # 5 Fix backtick which tests do not work
 # 6 remove config sub
+# 7 Reduce memory footprint! Currently using > 30GB with Jaspar 5
+# 8 Parallelise & make recoverable
+# 9 Restrict to motifs we are interested
+# 10 which_path for run_moods.pl is checking /usr/local/ensembl/bin which is not apparently in the $PATH?
+# 11 Move all batch management/merge to Hive and simplify this script to iterate over the target files
+#    or fail. Move as much as poss to MotifTools
 
 #Requirements
 #Do this in a pre-exec before we process anything?
@@ -137,93 +143,78 @@ use File::Basename;
 use IO::Handle;
 use IO::File;
 use DBI qw( :sql_types );
-#use lib '/nfs/users/nfs_d/dkeefe/src/personal/ensembl-personal/dkeefe/perl/modules/';
+
+use Bio::EnsEMBL::Funcgen::Sequencing::SeqTools   qw( explode_fasta_file );
+use Bio::EnsEMBL::Funcgen::Sequencing::MotifTools qw( read_matrix_file get_revcomp_file_path );
+use Bio::EnsEMBL::Funcgen::Utils::EFGUtils        qw( run_backtick_cmd run_system_cmd which_path );
+
 $ENV{PATH} .= ':/usr/local/ensembl/bin/'; #fastaclean home, probably needs moving to /software/ensembl/bin
 
-my($user, $password, $driver, $host, $port);
+my ($user, $password, $driver, $host, $port, $out_dir);
 my $outfile='';
 my $infile='';
 my $sp;
 my $verbose = 0;
+my $score_thresh_perc = 0.7; # 70% of max
 my $pwm_type = 'jaspar';
-my $work_dir = "/lustre/scratch103/ensembl/dkeefe/pwm_genome_map_$$/";
-#my $work_dir = "/lustre/scratch101/ensembl/ds19/tmp/";
 
 my $genome_file;
-#Changed DS
-my $moods_mapper = '/software/ensembl/funcgen/find_pssm_dna';
-#my $moods_mapper = '~dkeefe/bin/find_pssm_dna';
 my $thresh = 0.001;
 my $assembly;
 
 my %opt;
 
 if(! @ARGV){
-  &help_text;
+  help_text();
 }
 
 print "$0 @ARGV\n";
-&Getopt::Std::getopts('a:s:t:g:h:v:o:i:p:w:', \%opt) || die ;
+Getopt::Std::getopts('a:s:t:g:h:v:o:i:p:', \%opt) || die ;
 
 
 # get configuration from environment variables
 #&config; # this may fail but config can be on command line
 
 
-&process_arguments;
-my @pwm_files = @ARGV;
+process_arguments();
+ 
+my @pwm_files    = @ARGV;
+my $work_dir     = $out_dir.'/tmp_results';
+my $lsf_out_dir  = $work_dir.'/lsf_out';
+#which_path as run_moods.pl is likely in a subdir of the $PATH
+#Do it here, as it's a bit slow to do it in a loop
+print "Finding run_moods.pl path...\n";
+my $moods_path   = which_path('run_moods.pl');
+#Now allowing recovery
+#To force, simply delete the relevant output manually?
+#if($force){
+#  run_system_cmd("rm -rf $work_dir" if -e $work_dir;
+#}
 
-`rm -rf $work_dir`;
-#$verbose = 2;
-&backtick("mkdir -p $work_dir"."/genome");
+run_system_cmd("mkdir -p $lsf_out_dir") if ! -e $lsf_out_dir;
 
-
-# irrespective of pwm_type we need to create the rev-comp matrices and put all the matrices in a working directory - along with a composite matrix_list.txt file
-my %file_max_score;
-my $matrix_file;
-if($pwm_type eq 'jaspar'){
-
-    # we assume the matrix_list.txt file is in same dir as PWMs
-    #$matrix_file = &find_matrix_txt(\@pwm_files) or die
-    #    "Unable to find a matrix_list.txt file for the jaspar matrices \n".
-    #    join("\n",@pwm_files[0..5])." etc.\n";
-    #&backtick("cp $matrix_file $work_dir");
-
-    # we move the PWM files to the working dir and create rev-comp files
-    # there too, making additions to the matrix_list in working dir as we go
-    foreach my $file (@pwm_files){
-        &backtick("cp $file $work_dir"); 
-        &rev_comp_matrix($file,$work_dir);
-	my($min,$max)= &matrix_min_max($file,$work_dir);
-	print basename($file)."\t$min\t$max\n" if $verbose > 1;
-	$file_max_score{ basename($file) } = $max;
-    }
-
-}
-elsif($pwm_type eq 'transfac'){
-    # if the pwm_type isn't Jaspar we need to convert them into Jaspar pfm 
-    # format and create a matrix_list.txt file. Put new PWM files etc. in 
-    # working directory
-    # Transfac matrixes all come in a single file 
-    if(@ARGV > 1){
-	die "Transfac matrices should all be in a single file, not ".
-             join("\n",@ARGV)."\n";
-    }
-
-    my @pwm_files = &parse_matrixdat_2_pfm($ARGV[0],$work_dir);
-
-    foreach my $file (@pwm_files){
-	&rev_comp_matrix($file,$work_dir);
-	my($min,$max)= &matrix_min_max($file,$work_dir);
-	print basename($file)."\t$min\t$max\n";
-	$file_max_score{ basename($file) } = $max;
-    }
-}
-else{
-    die "Can only handle Jaspar and Transfac formats at present\n";
-}
+#This will be validated before we run moods, 
+#but not before we preprocess the matrices and submit the jobs
+#So leave here for now, until we add a DBI or DBConnection helper method to DBAdaptorHelper?
+#based on params hash. 
 
 
+#my $jdbh;
+#my $dsn = sprintf( "DBI:%s:%s:host=%s;port=%s",
+#                     'mysql', $jdb_name, $jdb_host,
+#                     3306 );
+
+#eval {
+#  $jdbh = DBI->connect( $dsn, $jdb_user, undef,
+#                          { 'RaiseError' => 1 } );
+#  };
+
+#my $error = $@;
+
+#if ( ! $jdbh || $error || ! $jdbh->ping ) {
+#  die( "Could not connect to database using [$dsn] as a locator:\n" . $error );
+#}
+  
 
 # we need to explode the genome.fasta file into individual sequences.
 # and if abbreviated chr names have been requested change the file names
@@ -231,92 +222,368 @@ else{
 # also if the sequences contain characters other than [acgtnACGTN] they need
 # to be converted to N otherwise find_pssm_dna outputs the wrong coords.
 #$verbose = 2;
-my @chr_files = &explode_genome_fasta($genome_file,$work_dir.'genome',$assembly);
 
-my $jdbh;
-my $dsn = sprintf( "DBI:%s:%s:host=%s;port=%s",
-                     'mysql', 'JASPAR_v5_0', 'ens-genomics1',
-                     3306 );
+#Move genome files outside of workdir
+#As these are reference files which maybe re-used.
+my @chr_files = @{explode_fasta_file($genome_file, $out_dir.'/genome', $assembly, 1)};
 
-eval {
-  $jdbh = DBI->connect( $dsn, 'ensro', undef,
-                          { 'RaiseError' => 1 } );
-  };
 
-my $error = $@;
+# irrespective of pwm_type we need to create the rev-comp matrices and put all the matrices in a working directory - along with a composite matrix_list.txt file
+my %file_max_score;
+my $pfm_job_info = {};
 
-  if ( !$jdbh || $error || !$jdbh->ping ) {
-    die( "Could not connect to database using [$dsn] as a locator:\n" . $error );
+if($pwm_type eq 'jaspar'){
+
+  foreach my $file (@pwm_files){
+    run_matrix_alignments($file, $pfm_job_info);
   }
-  
-
-# now we map all the PWMs to each genomic sequence
-
-#NJ parallelise this on the farm!!!
-#This is currently running to triple the memory footprint of previous runs!
-#what is being cached in this loop, and why is there so much more of it for a modest increase 
-#in the size of Jaspar
-#%file_max_score might be the cuplrit
-#Nope this is only accessed in parse_out_2_tab, not populated
-
-foreach my $chr_file (@chr_files){
-
-    my $tab=my $out=$chr_file;
-    $tab =~ s/fa/tab/;
-    $out =~ s/fa/out/;
-    my $command = "$moods_mapper -f  $thresh $chr_file $work_dir"."*.pfm > $out";
-    warn $command."\n";
-    &backtick("$command");
-    &parse_out_2_tab($out,$tab,$jdbh,\%file_max_score);
-    #&backtick("rm -f $out");
-    #&backtick("rm -f $chr_file");
+}
+#elsif($pwm_type eq 'transfac'){
+#  # if the pwm_type isn't Jaspar we need to convert them into Jaspar pfm 
+#  # format and create a matrix_list.txt file. Put new PWM files etc. in 
+#  # working directory
+#  # Transfac matrixes all come in a single file 
+#  if(@ARGV > 1){
+#    die "Transfac matrices should all be in a single file, not ".join("\n",@ARGV)."\n";
+#  }
+#
+#  foreach my $file (parse_matrixdat_2_pfm($ARGV[0],$work_dir)){
+#    run_matrix_alignments($file, $pfm_job_info);
+#  }
+#
+#  #This should have really been done upstream of here!
+#  #as the jaspar pmf files are not generated
+#}
+else{
+  die "Can only handle Jaspar and Transfac formats at present\n";
 }
 
 
-# collate individual .tab files into the specified output file
-my $command = "cat $work_dir/genome/*.tab > $outfile ";
-&backtick($command);
+### Wait for jobs arrays and merge files ###
 
-# count how many mappings we got for each matrix
-#$command = "cut -f4 $outfile | sort| uniq -c > $work_dir"."pwm_mapping_counts_".$pwm_type;
-#&backtick($command);
-
-# tidy up
-`rm -rf $work_dir`;
-exit;
+my $sleep_interval = 10; #seconds
+#Start low as most will have been completed by the time all the 
+#jobs have been submitted, and the loop itself will take some more time
+my $submitted = grep { $_->{job_array_id} } values(%$pfm_job_info);
+my $num_still_running = grep { ! $_->{processed} } values(%$pfm_job_info);
+my $merged    = grep { $_->{processed} }    values(%$pfm_job_info);
 
 
+
+#Also need to count those run but not merged yet
+my $seen_failures = 0;
+
+
+#warn "num still running is $num_still_running";
+
+
+#This will loop indefinitely if we encounter a non-trnasient job state which is
+#not DONE or EXIT e.g. UNKWN
+
+#
+#These may have already have finished in a previous run
+#Also processed is being set in run_pwm_alignments if all
+#batch output is present, but here this is used as a flag for merged
+#which they may not have been
+
+#Also bjobs_poll seems not to work properly yet
+
+#This while needs changing, as we may have non_still running, but some to merge
+# move sleep
+
+while($num_still_running){
+
+  foreach my $pfm_file(keys %$pfm_job_info){
+    my $p_info = $pfm_job_info->{$pfm_file};
+
+    if(! $p_info->{processed}){
+
+      if(defined $p_info->{job_array_id}){
+        print "Checking batch jobs for $pfm_file (Job ID = ".$p_info->{job_array_id}.")\n";
+        my ($finished, $success, $j_info) = bjobs_poll($p_info->{job_array_id});
+        print "Finished $finished/".$p_info->{array_size}.". Success for $success\n";
+
+        if($finished == $p_info->{array_size}){
+          
+
+          if($success != $finished){ #We have some EXITs
+            #Remove the complete jobs
+            delete $j_info->{DONE};
+            warn 'Found '.($finished - $success)." failed jobs:\t$pfm_file\nSkipping merge...\n";
+            $p_info->{failed_jobs} = $j_info;
+            $seen_failures++;
+          }
+          else{ #Submit merge job
+            print "Job array completed successfully:\t$pfm_file\nProceeding with merge...\n";
+            merge_files($p_info);
+            $merged++;
+          }
+
+         #We are starting to see arrays complete
+          #So merge time is probably long enough to wait before next iteration
+          $sleep_interval = 0;
+          $submitted--;
+          $p_info->{processed} = 1;
+          $num_still_running--;
+        }
+        else{
+          $sleep_interval = 60;#assume we have to wait for something now 
+          #but this could be an uncaught state.
+        }
+      }
+      else{ #Must have all files, but not merged yet
+        $sleep_interval = 0;
+        print "Running merge for previously run $pfm_file batch jobs\n";
+        merge_files($p_info);
+        $p_info->{processed} = 1;
+        $merged++;
+        $num_still_running--;
+      }
+    }
+    else{ #Is already processed
+      next;
+    }
+
+    print "$merged merged. $submitted submitted. $num_still_running in total to process.".
+      " Sleeping for $sleep_interval seconds...\n";
+
+    #Having sleep here instead of at start means we may poll bjobs before
+    #the batch daemon has had chance to process the bsub, and may return nothing
+    #This will result in sleep being set to 60 from beginning
+    sleep $sleep_interval;   
+  }
+}
+
+if($seen_failures){ # Summarise failures and die
+  warn "FAILURE SUMMARY\n";
+
+  foreach my $pfm_file(keys %$pfm_job_info){
+    my $p_info = $pfm_job_info->{$pfm_file};
+
+    if($p_info->{failed_jobs}){
+      warn $pfm_file."\n";
+
+      map { warn $_.":\t".join(' ', @{$p_info->{failed_jobs}->{$_}})."\n" } 
+       keys %{$p_info->{failed_jobs}};
+    }
+  }
+  die("$seen_failures/".scalar(%$pfm_job_info).' PFMs had failures');
+}
+else{
+  #Tidyup only if we have seen no failures to allow recovery
+  #unlink(@chr_files);#We always run fastaexplode, so may aswell
+  run_system_cmd("rm -rf $work_dir");
+}
+
+sub merge_files{
+  my $p_info = shift;
+
+  #cating inline shouldn't take too much time.
+  #and data sets will complete at different times
+  #so little time lost here
+  
+  #Sort here as the rev comp mapping will simply be listed after all the normal mappings
+
+  my $cat_cmd = 'cat '.join(' ', @{$p_info->{output_files}}).' | sort -k1,1 -k2,2n -k3,3n > '.$p_info->{merged_file}.'.tmp';
+  print "Merging files to:\t".$p_info->{merged_file}."\n";
+
+  #Wrap this in eval too
+  run_system_cmd('rm -f '.$p_info->{merged_file}.'.tmp') if -e $p_info->{merged_file}.'.tmp';
+
+  if(my $exit_code = run_system_cmd($cat_cmd, 1)){
+    #use no exit flag, so we can process the rest before failing
+    my $err = "Failed to run merge command:\n$cat_cmd\nExit code:\t$exit_code";
+    $seen_failures++;
+    $p_info->{failed_jobs} = {'MERGE_FAIL' => [ $err ]};    
+    warn $err."\n";
+  }
+  else{
+    run_system_cmd('mv '.$p_info->{merged_file}.'.tmp '.$p_info->{merged_file});
+    run_system_cmd("rm -f ".join(' ', @{$p_info->{output_files}}));
+  }
+
+  return;
+}
+
+
+sub bjobs_poll{
+  my $job_id       = shift || die("Must provide an LSF job ID to poll");
+  my @bjobs_output = run_backtick_cmd('bjobs '.$job_id);
+  my %job_info     = (DONE => [], EXIT => []);
+
+  if($bjobs_output[0] !~ /^JOBID/o){
+    #Throw here?
+    warn "Unexpected output from bjobs:\n".join("\n", @bjobs_output);
+  }
+  else{
+    #CHECK for DONE/EXIT jobs, else assume we are in some
+    #sort of RUN or suspended status
+    #what about UNKWN?
+    shift @bjobs_output; #Remove the header line
+    my ($state, $job_name);
+
+    foreach my $job_line(@bjobs_output){
+      (undef, undef, $state, undef, undef, undef, $job_name) = split(/\s+/, $job_line);
+      #Get and append array index from job name
+      my $batch_job_id = $job_id;
+
+      $batch_job_id .= $1 if $job_name =~ /(\[[0-9]+\])$/o;
+      $job_info{$state}||= [];
+      push @{$job_info{$state}}, $batch_job_id;
+    }
+  }
+  #We need to return total number 'complete'
+  #what about unknown jobs? And other states?
+  #Also need to return those which have status EXIT or weren't DONE
+  return (scalar(@{$job_info{EXIT}}) + scalar(@{$job_info{DONE}}), 
+          (scalar(@{$job_info{DONE}})), 
+          \%job_info);
+}
+
+
+#is the rc file being passed as an argument to find_pssm_dna
+
+sub run_matrix_alignments{
+  my $pfm_file_path = shift;
+  my $pfm_job_info  = shift;
+  #my $file_max_score = shift;
+  #my $work_dir = shift; #global
+
+  my $pfm_file_name = basename($pfm_file_path);  
+
+  #warn "HARDCODED PB0111.1.pfm only for debug";
+  #return if $pfm_file_name ne 'PB0111.1.pfm';
+
+  print "Preparing to submit alignment jobs for:\t$pfm_file_name\n";
+
+  #This has already been created in run_pwm_mapping_pipeline.pl
+  my $rc_file       = get_revcomp_file_path($pfm_file_path);
+
+  #This is actually no longer used here?
+  #my ($min, $max)                 = matrix_min_max($pfm_file_name, $work_dir);
+  #$file_max_score{$pfm_file_name} = $max;
+  #print $pfm_file_name."\t$min\t$max\n" if $verbose > 1;
+  my $format = 'bed';
+  (my $all_mappings_file = $pfm_file_name) =~ s/\.pfm$/.unfiltered.${format}/o;
+  $all_mappings_file = $out_dir.'/'.$all_mappings_file;
+
+  $pfm_job_info->{$pfm_file_name} = 
+   {job_array_id => undef,
+    array_size   => undef,
+    output_files => [],
+    merged_file  => $all_mappings_file}; 
+  #This block currently auto-recovers complete files
+  #To force a re-run requires deleting the output
+  my $seen = 0;
+
+  if(! -e $all_mappings_file){
+    my @target_files;
+    (my $out_prefix = $work_dir.'/'.$pfm_file_name) =~ s/\.pfm$/.unfiltered/o;
+
+    foreach my $chr_file (@chr_files){
+      #explode_genome_fasta makes file named after the seq_region_name e.g 5.fa
+      (my $chr = basename($chr_file)) =~ s/\.fa(sta)*$//o;
+ 
+      #This has to match what MotifTools::run_moods creates
+      my $chr_out_file = $out_prefix.'.'.$chr.'.'.$format;
+      push @{$pfm_job_info->{$pfm_file_name}{output_files}}, $chr_out_file;
+      #This does not yet support recovery from out file
+      #This needs to be implemented in run_moods.pl!
+
+      if(! -e $chr_out_file){     
+        push @target_files, $chr_file;
+      }
+      #else{
+      #  #warn "Already seen $chr_out_file\n";
+      #  $seen++;
+      #}
+    }
+
+    my $asize = scalar(@target_files);
+    $pfm_job_info->{$pfm_file_name}{array_size}   = $asize;
+
+    if($asize){
+
+      if($asize != scalar(@{$pfm_job_info->{$pfm_file_name}{output_files}})){
+        warn 'Already seen '.(scalar(@{$pfm_job_info->{$pfm_file_name}{output_files}}) - $asize).
+          '/'.scalar(@{$pfm_job_info->{$pfm_file_name}{output_files}})." expected output files\n";
+      }
+    
+      my $command = $moods_path." --format $format --job_array ".
+       "--out_prefix $out_prefix --queries $pfm_file_path $rc_file --targets ".
+       join(' ', @target_files);
+      #--host $jdb_host --dbname $jdb_name --user $jdb_user ".
+      #default --p_thresh is 0.001
+
+      print "Submitting $asize jobs for:\t$pfm_file_name\n";
+      $pfm_job_info->{$pfm_file_name}{job_array_id} = bsub_job_array($pfm_file_name, $asize, "$command");
+    }
+    else{
+      warn 'Skipping run_moods.pl submission. Already seen all expected '.
+       "intermediate output for ${pfm_file_name}\n";#.join(' ', @{$pfm_job_info->{$pfm_file_name}{output_files}});
+    }
+  }
+  else{
+    $pfm_job_info->{$pfm_file_name}{processed} = 1;
+    print "Skipping job submission. Already seen final merged output file:\t$all_mappings_file\n";
+  }
+  
+  return $pfm_job_info;
+}
+
+
+sub bsub_job_array{
+  my $job_name    = shift;
+  my $array_size  = shift;
+  my $job_cmd     = shift;
+ 
+  my $bsub_params = '-M 6000 -R"select[mem>6000] rusage[mem=6000]" '.
+   "-o $lsf_out_dir/$job_name.\%J.\%I.out -e $lsf_out_dir/$job_name.\%J.\%I.err";
+  my $cmd         = "bsub -J \"${job_name}[1-${array_size}]\" $bsub_params '$job_cmd'";
+  my $bsub_output = run_backtick_cmd($cmd);
+  #print $bsub_output."\n";
+
+  if($bsub_output =~ /Job \<([0-9]+)\> is submitted to /){
+    $bsub_output = $1;
+  }
+  else{  
+    #This is slightly brittle, we could do some retry here?
+    throw("Failed to submit job:\n$cmd\n$bsub_output");
+  }
+
+  return $bsub_output;
+}
  
 ###################################################################
+
+#Move some of these to MotifTools.pm
+
+#Make this use read_matrix_file, or integrate it into read_matrix_file
+
 sub matrix_min_max{
-    my($file,$work_dir)=@_;
+  my $file = shift;
 
-    open(IN,$file) or die "failed to open $file";
+  open(IN,$file) or die "failed to open $file";
 
-    my %swap =( 0 => 3,
-                1 => 2,
-                2 => 1,
-                3 => 0
-	       );
 
     my @mat;
     my $rows = 0;
     my $cols;
     my $sum; # we assume each col has the same sum, so just calc first
     while(my $line = <IN>){
-	chop $line;
-	unless($line =~ /[0-9]/){next}
+  chop $line;
+  unless($line =~ /[0-9]/){next}
         $line =~ s/^\s+(.*)/$1/; # remove leading whitespace
         $line =~ s/[\[\]]//g; #remove brackets if any
-	my @field = split(/\s+/,$line); # split on white space
-	#print join("\t",@field)."\n";
-	#print join("~",@field)."\n";
-	#my @rev= reverse(@field); # to get rev comp
-	#$mat[$swap{$rows}] = \@rev;# to get rev comp
-	#print join("\t",reverse(@field))."\n";
-	$mat[$rows] = \@field;
+  my @field = split(/\s+/,$line); # split on white space
+  #print join("\t",@field)."\n";
+  #print join("~",@field)."\n";
+  #my @rev= reverse(@field); # to get rev comp
+  #$mat[$swap{$rows}] = \@rev;# to get rev comp
+  #print join("\t",reverse(@field))."\n";
+  $mat[$rows] = \@field;
         $rows++;
-	$sum += $field[0];
+  $sum += $field[0];
     }
     if($rows > 4){ die "too many rows in file $file" }
     close(IN); 
@@ -325,9 +592,9 @@ sub matrix_min_max{
     # convert to probabilities and transpose to facilitate get_max_add()
     my @new_mat;
     for(my $i = 0;$i<$rows;$i++){
-	for(my $j=0;$j<$cols;$j++){
-	    $new_mat[$j][$i] = ($mat[$i]->[$j])/$sum;
-	}
+  for(my $j=0;$j<$cols;$j++){
+      $new_mat[$j][$i] = ($mat[$i]->[$j])/$sum;
+  }
     }
 
 
@@ -337,11 +604,10 @@ sub matrix_min_max{
     print $file."\n".$matrix_id."\n";
     unless($matrix_id){die "problem parsing matrix name $file"}
 
-    my($min_pos,@sums) = &get_max_add(@new_mat);
+    my($min_pos,@sums) = get_max_add(@new_mat);
     return($min_pos,$sums[0]);
 
 }
-
 
 
 # this doesn't do exactly the same as find_pssm_dna cos the latter does some
@@ -365,8 +631,8 @@ sub get_max_add{
 	#$min_sum += &log2( $list[3]/0.25 );
 
 	$maxes[$i] = ((($list[0])+0.002)/1.008)/0.25;
-	$maxes[$i] = &log2($maxes[$i]);
-	$min_sum += &log2( ((($list[3])+0.002)/1.008)/0.25 );
+	$maxes[$i] = log2($maxes[$i]);
+	$min_sum  += log2( ((($list[3])+0.002)/1.008)/0.25 );
 
     }
  
@@ -385,6 +651,8 @@ sub get_max_add{
     return($min_sum,@sums);
 }
 
+
+#What? This is logn not log2!
 sub log2{
     my $n = shift;
 
@@ -392,6 +660,9 @@ sub log2{
 
 }
 
+
+#TODO 
+#Move these transfac methods to MotifTools and integrate into read_matrix_file
 
 # converts a single transfac matrix.dat file to multiple jaspar pfm files
 sub parse_matrixdat_2_pfm{
@@ -413,7 +684,7 @@ sub parse_matrixdat_2_pfm{
 	if($line =~ /^AC/){($ac) = $line =~ /AC  (M[0-9]+)/; }
         if($line =~ /^NA/){($name) = $line =~ /NA  (.+)/; }
 	if($line =~ /^P0/){
-	my $pfm = &process_matrix($ifh,$ofh,$ac,$name,$work_dir);
+	my $pfm = process_matrix($ifh,$ofh,$ac,$name,$work_dir);
 	push @files, $pfm;
 	}
 
@@ -465,329 +736,9 @@ sub process_matrix{
 
 
 
-sub parse_out_2_tab{
-   #my($out,$tab,$matrix_file,$max_scores_ref)=@_;
-
-  my($out,$tab,$dbh,$max_scores_ref)=@_;
-  
-  open(IN,$out) or die "couldn't open file $out ";
-  open(OUT,">$tab") or die "couldn't open file $tab ";
-  
-  my $chr = basename $out;
-  $chr =~ s/\.out//;
-  
-  my $strand;
-  my $id;
-  my $addn;
-  my $tf_name;
-  my $score_thresh;
-  while(my $line = <IN>){
-    chop $line;
-    if($line eq ''){
-	    next;
-    }
-    elsif($line =~ /^>/){
-	    $line =~ s/>//;
-	    $id = basename $line;
-	    $id =~ s/\.pfm//;
-      
-      # get TF name from matrix_list file
-	    #$tf_name = &backtick("grep '^$id	' $matrix_file |cut -f3");
-	    
-	    ($tf_name) = $dbh->selectrow_array("SELECT NAME from MATRIX where BASE_ID='$id'");
-	    
-	    
-	    
-	    chop($tf_name); #wtf? taking off the version but not the dot?
-	    unless($tf_name){
-	      warn "Failed to get TF name from the DB:\t$id\n";
-             #   warn "Failed to get TF name for $id from $matrix_file";
-	    }
-      $strand = '1';
-	    if($id =~ 'rc'){
-        $strand = '-1';
-        $id =~ s/rc//;
-	    }
-	    $score_thresh = $max_scores_ref->{$id.'.pfm'} * 0.7; # 70% of max
-	    $score_thresh = 0;
-	    &commentary( $max_scores_ref->{$id.'.pfm'} ." = max score for $id $tf_name\n") if $verbose;
-      
-	    $line = <IN>;
-	    ($addn) = $line =~ /.*Length:([0-9]+)/;
-    }
-    else{
-	    my($start,$score)= split("\t",$line);
-	    if($score > $score_thresh){
-        print OUT join("\t",$chr,($start+1),($start+$addn),$tf_name,
-                       $score,$strand,$id)."\n" or 
-                         die "failed to print to $tab" ;
-	    }
-    }
-  }
-  close(IN);
-  close(OUT);
-}
-
-
-# get the individual sequences from the genome file and put them in files
-# which have the fasta id as their name and an extension of .fa
-# optionally reduce chromosome name to chr_name as in ensembl databases
-# returns the list of files produced or dies
-sub explode_genome_fasta{
-  my($genome_file,$target_dir,$assembly) = @_;
-  &commentary("exploding $genome_file to $target_dir") if $verbose;
-  
-  if (! $genome_file){
-    die('Genome file not defined');
-  }
-  
-
-  warn "GENOME file is $genome_file";
-  
-	#These tests do not work!
-  
-  my $res = &backtick("which fastaclean");
-  if($res =~ 'not found'){
-    die "Need to implement fastaclean functionality here";
-  }
-  
-  
-  $res = &backtick("which fastaexplode");
-    if($res =~ 'not found'){
-      die "Need to implement fastaexplode functionality here";
-    }else{
-      &backtick("fastaexplode -f $genome_file -d $target_dir");
-    }
-  
-  
-  $res = &backtick("ls -1 $target_dir"."/*.fa");
-  my @lines = split("\n",$res);
-  
-  unless(@lines > 0){
-    die "ERROR: No genome files produced by splitting".$genome_file;
-  }
-  
-  # now we alter the file names if short chromosome names have been requested
-  if($assembly){
-
-    my @short_names;
-    foreach my $file_path (@lines){
-	    my $name = basename $file_path;
-      # sed 's/chromosome:$assembly:/chr/'|sed 's/supercontig:$assembly://' |sed 's/supercontig:://' | sed 's/:[0-9:]*//'
-      
-	    $name =~ s/chromosome:$assembly://;
-	    $name =~ s/supercontig:$assembly://;
-	    $name =~ s/supercontig:://;
-	    $name =~ s/:[0-9:]*//;
-	    my $path = dirname $file_path;
-	    my $new = $path.'/'.$name;
-
-      #This is not working as all but the Y chr are already short names
-      #temp hack to get it running
-      my $command;
-
-      if($file_path =~ /chromosome:GRCh37:Y/){
-
-      
-
-        $command = "fastaclean -a -f $file_path > $new ; rm -f $file_path";
-      }
-      else{
-        my $path = dirname $file_path;
-        my $new = $path.'/tmp';
-        $command = "fastaclean -a -f $file_path > $new ;".
-        " rm -f $file_path ;mv $new $file_path";
-      }
-
-
-        warn "executing: $command";
-
-
-
-	    &backtick($command);
-	    push @short_names, $new;
-    }
-    return @short_names;
-  }else{
-    foreach my $file_path (@lines){
-      # just do fastaclean
-	    my $path = dirname $file_path;
-	    my $new = $path.'/tmp';
-	    my $command = "fastaclean -a -f $file_path > $new ;".
-        " rm -f $file_path ;mv $new $file_path";
-
-      warn "executing: $command";
-	    &backtick($command);
-    }
-    
-  }
-  
-  
-  return @lines;
-}
-
-
-
-# assumes a jaspar matrix pfm file with 4 rows A C G T
-sub rev_comp_matrix{
-    my($file,$work_dir)=@_;
-
-    open(IN,$file) or die "failed to open $file";
-
-    my %swap =( 0 => 3,
-                1 => 2,
-                2 => 1,
-                3 => 0
-	       );
-
-    my @mat;
-    my $rows = 0;
-    my $cols;
-    while(my $line = <IN>){
-	chop $line;
-	unless($line =~ /[0-9]/){next}
-        $line =~ s/^\s+(.*)/$1/; # remove leading whitespace
-        $line =~ s/[\[\]]//g; #remove brackets if any
-	my @field = split(/\s+/,$line); # split on white space
-	#print join("\t",@field)."\n";
-	#print join("~",@field)."\n";
-	my @rev= reverse(@field);
-	$mat[$swap{$rows}] = \@rev;
-	#print join("\t",reverse(@field))."\n";
-        $rows++;
-
-    }
-    if($rows > 4){ die "too many rows in file $file" }
-    close(IN); 
-
-    # jaspar IDs can be MA for core, CN for CNE, PB, PH and PF for PHYLOFACTS
-    # our own PWM IDs are FG
-    #my($matrix_id) = $file =~ /.*([MPCF][AFNG][0-9]+).pfm/;
-    my($matrix_id,$version) = $file =~ /.*([MPCF][AFNGBHL][0-9]+).([0-9]*).pfm/;
-    print $file."\n".$matrix_id." $version\n";
-    unless($matrix_id){die "problem parsing matrix name $file"}
- 
-
-    my $rc_file = $work_dir.$matrix_id.'rc.'.$version.'.pfm';
-    print $rc_file."\n";
-    open(OUT,"> $rc_file") or die "failed to open file $rc_file";
-
-    for(my $i=0;$i<$rows;$i++){
-        print OUT join(" ",@{$mat[$i]})."\n";
-    }
-
-    close(OUT);
-
-    #NJ don't need this now, we just need to add support fo DB access where ever this is used
-    #was this ever being used again
-
-    # get the relevant line from the matrix_list.txt file
-    # by grepping for the id at the start of the line
-    # add rc to the ID and append the line to matrix_list.txt
-    #my $res = &backtick("grep '^$matrix_id.$version' $work_dir".
- #                       "matrix_list.txt");
- #   print $res;
-    #chop($res);
-    #my @field = split("\t",$res);
-    ##$field[0] .= 'rc';
-    #$field[0] = $matrix_id.'rc.'.$version;
-    #$res = join("\t",@field);
-    ##print $res."\n";
-    #open(OUT, ">> $work_dir"."matrix_list.txt") or 
-    #    die "failed to open $work_dir"."matrix_list.txt for appending";
-    #print OUT $res."\n" or die "failed to write to  $work_dir".
-    #                           "matrix_list.txt";
-    #close(OUT);
-
-
-}
-
-
-
-# There should be a matrix_list.txt file in the same directory as the pfm files
-sub find_matrix_txt{
-    my($pwm_files_aref) = @_;
-
-    foreach my $file_path (@$pwm_files_aref){
-	my @field = split('/',$file_path);
-
-	if(@field ==1){ 
-            # we're working in the matrix directory
-            if( -e "./matrix_list.txt"){
-		return("./matrix_list.txt");
-	    }
-	}else{
-	    pop @field;
-	    my $check = join('/',@field).'/matrix_list.txt';
-	    #print "checking $check\n";
-	    if( -e $check){return($check)}
-	}
-
-    }
-
-    return '';
-
-}
-
-
-# makes shell execute command and checks for errors
-# returns the output of the command unprocessed
-sub backtick{
-    my $command = shift;
-
-    warn "executing $command \n" if ($verbose ==2);
-
-    my $res = `$command`;
-    if($?){
-        warn "failed to execute $command\n";
-        warn "output:\t$res\n";
-	die "exit code $?";
-    }
-
-    return $res;
-}
-
-
-
-
-# when using backticks to exec scripts the caller captures STDOUT
-# its best therefore to have error on STDOUT and commentary on STDERR
-sub commentary{
-    print STDERR "$_[0]";
-}
-
-
-
-
-sub config{
- 
-($user =     $ENV{'ENSMARTUSER'}) or return(0); # ecs1dadmin
-($password = $ENV{'ENSMARTPWD'}) or return(0); #
-($host   =   $ENV{'ENSMARTHOST'}) or return(0); #localhost
-($port =     $ENV{'ENSMARTPORT'}) or return(0); #3360
-($driver  =  $ENV{'ENSMARTDRIVER'}) or return(0); #mysql
- 
-}
-   
-sub err{
-    print STDERR "$_[0]\n";
-}
-  
-
-
-
-
 sub process_arguments{
-
     if ( exists $opt{'h'} ){ 
-        &help_text;
-    }
-
-
-
-
-    if (exists $opt{w}){
-        $work_dir = $opt{w}; 
+        help_text();
     }
 
     if (exists $opt{p}){
@@ -809,9 +760,9 @@ sub process_arguments{
 
 
     if (exists $opt{o}){
-        $outfile = $opt{o};
+        $out_dir = $opt{o};
     }else{
-	&help_text("Please give a name for the output file");
+	   help_text("Please give a path for the output directory");
     }
 
 
@@ -843,22 +794,21 @@ sub help_text{
     my $msg=shift;
 
     if ($msg){
-      print STDERR "\n".$msg."\n";
+      warn "\n".$msg."\n";
     }
 
-    print STDERR <<"END_OF_TEXT";
+    warn <<"END_OF_TEXT";
 
-  pwm_genome_map.pl -g fasta_file -o output_file [options] pwm_file1 [pwm_file2 pwm_file3 ...]
+  pwm_genome_map.pl -g fasta_file -o output_dir [options] pwm_file1 [pwm_file2 pwm_file3 ...]
 
                   [-h] for help
                   [-a] <assembly_version> eg GCRh37 as used in full chr. name
                   [-t] <pwm_type> 'jaspar'=default, 'transfac' 
                   [-p] <probability> threshold for moods mapper default=0.001
                    -g  <file_name> genome fasta file
-                   -o  <output file> - name of a file for output
+                   -o  <output dir> path of a (spacious) output directory 
                   [-v] <integer> verbosity level
                   [-s] <species> eg -smus_musculus, default = homo_sapiens  
-                  [-w] <dir_name> path of a (spacious) working directory  
                   [-] 
                   [-] <> 
                   [-] <> 

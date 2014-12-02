@@ -47,8 +47,6 @@ sub fetch_input {
   my $self = $_[0];
   $self->SUPER::fetch_input;
 
-
-  
   #Set the DB if we haven't already in Base (for tracking)
   #This also sets species and assembly methods
   $self->_set_out_db if ! $self->use_tracking_db;
@@ -81,67 +79,136 @@ sub fetch_input {
 }
 
 
-#This is starting to overlap with the Importer a little
+#This is starting to overlap with the BaseImporter/Importer a little
 #but new style Peak import is not supported by Importer just yet.
 
-#todo expose generate_slices_from_names args
+#Move this (and similar methods) to a mix-in? so we can reuse this between objects (like a role)
+#
+
+#todo expose generate_slices_from_names args i.e. inc_dups!
+# change this to sub to use cache_slices, slices, slice_cache 
+# there is some support for this in the BaseImporter,
+# So we should probably move this code somewhere useable by all
+
+#Fix this here for now, then move everything to the Helper, so we can access it
+#here and from the Base/Importers
+
+#get_Slice does not handle seem to filter skip_slices/slices either
+
+#Slightly odd handling of non_PARs in here. But it the only way to safely
+#do it.
 
 sub slice_objects {
-  my ($self, $slice_objects) = @_;
+  my $self          = shift;
+  my $slice_objects = shift;
   
   if($slice_objects){
     assert_refs($slice_objects, 'Bio::EnsEMBL::Slice', 'slice_objects');   
   }
-  elsif(! defined $self->param_silent('slice_objects') ){
+  elsif(! defined $self->param_silent('slice_cache') ){
     $slice_objects = generate_slices_from_names
                       ($self->out_db->dnadb->get_SliceAdaptor, 
                        $self->slices, $self->skip_slices, 'toplevel', 
                        0, 0, $self->assembly); 
     #0, 0 are non_ref and inc_dups flags
+    
+    #Check we have some here
   }
    
   if($slice_objects){
     
-    if($self->param_silent('slice_objects')){
+    if($self->param_silent('slice_cache')){
       warn "Over-writing existing slice_objects";
-      $self->param_silent('slice_objects', {});  
+      $self->param_silent('slice_cache',    []); 
+      $self->param_silent('slice_registry', {});  
     }
     
-    my %slices;
-    map {$slices{$_->seq_region_name} = $_} @$slice_objects;
-    $self->param('slice_objects', \%slices); 
+    #Deref for safety, so we don't get any odd updating of this cache
+    #via the passed arrayref.
+    my $slices = [@$slice_objects];
+    $self->param('slice_cache', $slices);
+    #Point the registry at the cache to reduce footprint 
+    my %slice_registry;
+  
+    foreach my $i (0..$#{$slices}){
+      $slice_registry{$slices->[$i]->name} = $slices->[$i];
+
+      my $sr_name = $slices->[$i]->seq_region_name;
+
+      if(! exists $slice_registry{$sr_name}){
+        $slice_registry{$sr_name} = $slices->[$i];
+      }
+      else{ #Create and array to handle PARs
+
+        if(ref($slice_registry{$sr_name}) ne 'ARRAY'){
+           $slice_registry{$sr_name} = [$slices->[$i]];
+        }
+
+        push @{$slice_registry{$sr_name}}, $slices->[$i];
+      }
+    }
+
+    $self->param('slice_registry', \%slice_registry);
   } 
    
-  return [ values %{$self->param('slice_objects')} ]; 
+  return $self->param('slice_cache'); 
 }
 
 
-#to do validate assembly, and that start = 1 if we get a slice name?
+
 
 sub get_Slice {
-  my ($self, $seq_region) = @_;
+  my ($self, $name, $lstart, $lend) = @_;
 
-  #in case we have passed a slice name
-  if($seq_region =~ /^\S*:\S*:(\S+):\S+:\S+:\S/) { $seq_region = $1; }
-  #should we validate assembly here?
-  
+  $self->slice_objects if ! defined $self->param_silent('slice_registry');
+  my $slice_cache = $self->param_required('slice_registry');
+
   #In case UCSC input is used... carefull names may not match with ensembl db!
-  $seq_region =~ s/^chr//i;   #case insensitive     
+  #This should not alter slice names
+  $name =~ s/^chr([^o])/$1/i;   
 
-
-  my $slice_objects = $self->slice_objects;
-
-
-  #We have seen a slice, but have not restricted slices so this
-  #must be a slice we can't handle
-  my $slice = undef;
-  
-  if( (! exists $slice_objects->{$seq_region}) &&
-      (! ($self->slices || $self->skip_slices) ) ){
-    throw("Unable to get Slice for:\t".$seq_region);      
+  if( (! exists $slice_cache->{$name}) &&
+      (! ($self->slices || $self->skip_slices) ) ){    
+    #We have seen a slice, but have not restricted slices so this
+    #must be a slice we can't handle     
+    throw("Unable to get Slice for:\tx".$name.'x');      
   }
-  else{
-    $slice =  $self->slice_objects->{$seq_region}; 
+
+  my $slice = (exists $slice_cache->{$name}) ? 
+   $slice_cache->{$name} : undef;
+
+  if($slice && 
+     (ref($slice) eq 'ARRAY')){
+    #We have non-PAR regions cached as the slice cache was likely generated
+    #without no_dups set.
+
+    if(! ($lstart && $lend)){
+      throw('The slice cache has been generated without duplications i.e. '.
+        'it contains multiple Y non-PAR slices. This requires specifying a '.
+        'loci start and end value to resolve the slice required.'.
+        "\nAlternatively, generate the slice cache with the inc_dups argument set\n".
+        "Note: Setting inc_dups will result in duplicate features fetched across the X-Y PAR regions.");
+    }
+
+    #Identify the appropriate non-PAR slice
+    my $tmp_slice;
+
+    foreach my $non_par(@{$slice}){
+
+      if(( ($lstart >= $non_par->start) && ($lstart <= $non_par->end)) ||
+         ( ($lend   >= $non_par->start) && ($lend   <= $non_par->end)) ){
+        $tmp_slice = $non_par;
+        last;
+      }
+    } 
+
+    if(! defined $tmp_slice){
+      throw("Failed to find a non-PAR slice for:\t$name $lstart - $lend\n".
+        'This location must lie on a PAR region or outside the sequence');
+      #Print non_PARs here?
+    }
+
+    $slice = $tmp_slice;
   }
      
   return $slice;
@@ -169,7 +236,6 @@ sub fetch_Set_input{
     thow("$return_set_type is not a valid return set type, must be one of:\n\t".
         "DataSet FeatureSet ResultSet InputSet");
   }  
-    
   
   #why do we have a mistmach between the case of the set_type and the method name?
   #revert to title case i.e API standard as opposed to table name
@@ -181,10 +247,16 @@ sub fetch_Set_input{
   my $db             = $self->param_required('out_db');
   my $set_name       = $self->param_required('set_name');
   #can't $db->can($adaptor_method) as this doesn't work with autoload
+  
+  
+  $self->helper->debug(1, "Fetching $set_name $set_type with dbID $dbid");
   my $set            = $db->$adaptor_method->fetch_by_dbID($dbid);
   
   if(! defined $set){
     throw("Could not fetch $set_type with dbID $dbid ($set_name)"); 
+  }
+  elsif($set->name ne $set_name){
+    throw("Fetch $set_type with dbID $dbid, expected $set_name but got ".$set->name);  
   }
   
   $self->set_param_method($set_type, $set);
@@ -200,7 +272,7 @@ sub fetch_Set_input{
     }
     else{
       $self->helper->debug(2, "Setting result_set:\t".$rsets[0]->name);
-      $self->param('ResultSet', $rsets[0]);
+      $self->set_param_method('ResultSet', $rsets[0]);
     }
   }
   elsif($set_type eq 'ResultSet'){
@@ -214,13 +286,7 @@ sub fetch_Set_input{
     }
     else{
       $self->set_param_method('DataSet', $dsets[0]);
-      $self->helper->debug(2, "Setting data_set:\t".$dsets[0]->name);     
-    }
-  }
-  elsif($set_type eq 'InputSet'){
-    #return_set_type not valid for InputSets
-    if($return_set_type ne 'InputSet'){
-          
+      $self->helper->debug(2, "Setting data_set:\t".$dsets[0]->name);  
     }
   }
   else{
@@ -229,26 +295,25 @@ sub fetch_Set_input{
   
   
   
-  if($self->param_silent('data_set')){
-     my $fset = $self->data_set->product_FeatureSet;
+  if($self->param_silent('DataSet')){
+     my $fset = $self->DataSet->product_FeatureSet;
      
      if($fset){
-        $self->set_param_method('feature_set', $fset); 
+        $self->set_param_method('FeatureSet', $fset); 
         $self->helper->debug(2, "Setting feature_set:\t".$fset->name);        
      }
   }
   
-  if( ($return_set_type eq 'feature') &&
-      (! $self->param_silent('feature_set')) ){
+  if( ($return_set_type eq 'FeatureSet') &&
+      (! $self->param_silent('FeatureSet')) ){
     throw("Failed to fetch a FeatureSet using $set_type:\t".$set_name);
-  
   }
   
   #if we don't specify return_set_type
   #then an analysis may get an unexpected set returned if the data flow isn't correct
   #hence needs to be mandatory
   
-  return $self->param_required($return_set_type.'_set');
+  return $self->param_required($return_set_type);
 }
 
 =over
@@ -315,31 +380,6 @@ sub experimental_group   { return $_[0]->param('experimental_group');           
 
 
 
-
-
-
-###ÊOLD METHODS
-
-
-
-
-
-
-sub _study_name { #Currently same as set name, but could change?
-  return $_[0]->_getter_setter('study_name',$_[1]);
-}
-
-sub _set_name { #This is the default set name without any analysis suffix
-  return $_[0]->_getter_setter('set_name',$_[1]);
-}
-
-sub _file_type {
-  return $_[0]->_getter_setter('file_type',$_[1]);
-}
-
-sub _sam_header {
-  return $_[0]->_getter_setter('sam_header',$_[1]);
-}
 
 
 

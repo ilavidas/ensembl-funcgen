@@ -56,14 +56,13 @@ package Bio::EnsEMBL::Funcgen::DBSQL::DBAdaptor;
 use strict;
 use warnings;
 use DBI; #for resolving core DB
-use Bio::EnsEMBL::Utils::Exception         qw( throw deprecate ) ;
+use Bio::EnsEMBL::Utils::Exception         qw( throw deprecate warning );
 use Bio::EnsEMBL::Utils::Scalar            qw( assert_ref );
 use Bio::EnsEMBL::Utils::Argument          qw( rearrange );
 use Bio::EnsEMBL::Funcgen::Utils::EFGUtils qw( assert_ref_do );
 use Bio::EnsEMBL::Registry;
 
 use base qw(Bio::EnsEMBL::DBSQL::DBAdaptor);
-
 my $reg = "Bio::EnsEMBL::Registry";
 
 
@@ -312,7 +311,7 @@ sub are_stored_and_valid{
 
   return \@return_vals;
 
-  
+
 }
 
 
@@ -378,6 +377,7 @@ sub get_available_adaptors{
                'FGCoordSystem'          => 'Bio::EnsEMBL::Funcgen::DBSQL::CoordSystemAdaptor',
                'InputSet'               => 'Bio::EnsEMBL::Funcgen::DBSQL::InputSetAdaptor',
                'InputSubset'            => 'Bio::EnsEMBL::Funcgen::DBSQL::InputSubsetAdaptor',
+               'MirnaTargetFeature'     => 'Bio::EnsEMBL::Funcgen::DBSQL::MirnaTargetFeatureAdaptor',
                'MetaCoordContainer'     => 'Bio::EnsEMBL::Funcgen::DBSQL::MetaCoordContainer',
                'MotifFeature'           => 'Bio::EnsEMBL::Funcgen::DBSQL::MotifFeatureAdaptor',
                'Probe'                  => 'Bio::EnsEMBL::Funcgen::DBSQL::ProbeAdaptor',
@@ -401,32 +401,43 @@ sub get_available_adaptors{
   return (\%pairs);
 }
 
+
 =head2 _get_schema_build
 
   Arg [1]    : Bio::EnsEMBL::Funcgen::DBSQL::DBAdaptor or Bio::EnsEMBL::DBSQL::DBAdaptor
-  Example    : my $shema_build = $db->_get_schema_build($slice->adaptor->db());
-  DESCRIPTION:
-  Returntype : string
-  Exceptions : Throws if argument not supplied
-  Caller     : general
+  Example    : my $schema_build = $db->_get_schema_build($slice->adaptor->db());
+  DESCRIPTION: Given a DBAdaptor, parses the the 'SCHEMA_BUILD' string from the DB name.
+  Returntype : String or undef - 'SCHEMA_BUILD' as per the standard DB naming.
+  Exceptions : Throws if DBAdaptor not passed 
+               Warns if unable to match expected schema_build string format from the DB name
+               and returns undef.
+  Caller     : General
   Status     : At risk - replace with MetaContainer method
 
 =cut
 
-
-#Slightly hacky convenience method to get the data/schema.version/build from a feature slice
+# This is actually more accurately the DB suffix, as 
+# 1 The build is now just normally the assembly number (with some exceptions in EG)
+# 2 It may not be the current default schema_build used in the API if the coord_system.is_current flag
+#   has been moved to a different schema_build i.e. after the update_DB_for_release.pl script has been run
 
 sub _get_schema_build{
-  my ($self, $db) = @_;
-  #Have to explicitly pass self->db to this method if required, this highlights which db is being tested
-  throw("Need to define a DBAdaptor to retrieve the schema_build from") if (! $db);
+  my $self = shift;
+  my $db   = shift;
 
+  assert_ref($db, 'Bio::EnsEMBL::DBSQL::DBAdaptor');
   my $schema_build;
+  my $name = $db->dbc->dbname;
 
-  if ( $db->dbc->dbname =~ /.*_([0-9]+_[0-9]+[a-z]*)$/) {
-    #if( $db->dbc->dbname =~ /.*([0-9]+_[0-9]+[a-z]*)$/){
-    #warn "HARDCODED DEBUGGING FOR ANOMALOUS CORE DNADB INSERT";
+  if ($name =~ /.*_([0-9]+_[0-9]+[a-z]*)$/o) {
     $schema_build = $1;
+  
+    if (length($schema_build) > 10) {
+      $schema_build = substr($schema_build, -10);
+    }
+  }
+  else {
+    warning("Wrong format: '$name' Release & Assembly expected at the end of dbname, e.g.: *_core_75_37");
   }
 
   return $schema_build;
@@ -567,8 +578,7 @@ sub dnadb {
 
 
 sub _set_dnadb{
-  my $self = shift;
-
+  my $self       = shift;
   my $assm_ver   = $self->dnadb_assembly;
   my $dnadb_name = $self->dnadb_name;
 
@@ -587,30 +597,29 @@ sub _set_dnadb{
   my $lspecies = $reg_lspecies;
   $lspecies =~ s/[0-9]+$// if($lspecies =~ /[0-9]$/);
 
-
-  throw("Either specify a species parameter or set species.production_name in the meta table (DB: $dnadb_name) to set dnadb automatically, alternatively pass a dnadb parameter") if $lspecies eq 'default';
-
-  #Wse params first
-  #else registry params
-  #else ensembldb
-
-  my @ports = ($self->dnadb_port);
+  if( $lspecies eq 'default'){
+    throw('Either specify a species parameter or set species.production_name'.
+      " in the meta table (DB: $dnadb_name) to set dnadb automatically, alternatively pass a dnadb parameter");
+  }
 
   #Start with lastest MySQL instances
   #We are over-riding specified port here, only for known hosts
   #we should really account for this and make it nr
-  if ($self->dnadb_host eq 'ensdb-archive') { #
+  my @ports;
+
+  if($self->dnadb_port){
+    @ports = ($self->dnadb_port);
+  }
+  elsif ($self->dnadb_host eq 'ensdb-archive') { #
     @ports = (5304, 3304);
   } elsif ($self->dnadb_host eq 'ensembldb.ensembl.org') {
     @ports = (5306, 3306);
   }
 
+  my $match_name = $dnadb_name || $lspecies.'_core_%_'.$assm_ver.'%';
 
-  if (! $dnadb_name) {
-    $dnadb_name = $lspecies.'_core_%_'.$assm_ver.'%';
-  }
 
-  my $sql = 'show databases like "'.$dnadb_name.'"';
+  my $sql = 'show databases like "'.$match_name.'"';
   my ($dbh, @dbnames, $port, $host_port);
 
 
@@ -635,10 +644,13 @@ sub _set_dnadb{
     #Will always take the latest release, not the latest genebuild version
     #Which is probably what we want anyway
 
-    @dbnames = grep(/core_[0-9]/, sort @dbnames);
+    if(! $dnadb_name){
+      @dbnames = grep(/core_[0-9]/, sort @dbnames);
+    }
+
 
     if (scalar(@dbnames)==0) {
-      warn(':: Failed to find dnadb like '.$dnadb_name.', using '
+      warn(':: Failed to find dnadb like '.$match_name.', using '
            .$self->dnadb_user.'@'.$self->dnadb_host.':'.$port);
     } else {
       $host_port = $port;
@@ -646,15 +658,13 @@ sub _set_dnadb{
     }
   }
 
-  throw("Failed to find dnadb like $dnadb_name.") if(scalar(@dbnames)==0);
-
-
+  throw("Failed to find dnadb like $match_name.") if(scalar(@dbnames)==0);
   warn ":: Auto-selecting build $assm_ver core DB as:\t".
     $self->dnadb_user.'@'.$dbnames[$#dbnames].':'.$self->dnadb_host.':'.$host_port."\n";
 
-  my $db = $reg->reset_DBAdaptor($reg_lspecies, 'core', $dbnames[$#dbnames], $self->dnadb_host, $host_port, $self->dnadb_user, $self->dnadb_pass);
-
-
+  my $db = $reg->reset_DBAdaptor($reg_lspecies, 'core', $dbnames[$#dbnames],
+                                 $self->dnadb_host, $host_port,
+                                 $self->dnadb_user, $self->dnadb_pass);
   $self->dnadb($db);
   return $db;
 }
@@ -696,25 +706,23 @@ sub connect_string{
 
 #table is not really mandatory, and this can delete from multiple tables at a time
 
+#TODO return $row_cnt?
+#Use SQLHelper?
 
 sub rollback_table {
   my ( $self, $sql, $table, $id_field, $no_clean_up, $force_clean_up ) = @_;
+  my $row_cnt;
 
   if(! ($sql && $table)){
    throw('Must provide at least the SQL and table name arguments');
   }
 
-  my $row_cnt;
-
   #warn $sql;
-  eval { $row_cnt = $self->dbc->do($sql) };
-
-  if ($@) {
+  if(! eval { $row_cnt = $self->dbc->do($sql); 1 }){
     throw("Failed to rollback table $table using sql:\t$sql\n$@");
   }
 
   $row_cnt = 0 if $row_cnt eq '0E0';
-
   #$self->log("Deleted $row_cnt $table records");
 
   if ( $force_clean_up || ( $row_cnt && !$no_clean_up ) ) {

@@ -131,7 +131,7 @@ sub _get_current_FeatureSet{
 	$self->{'multicell_set'} = $self->db->get_FeatureSetAdaptor->fetch_by_name('RegulatoryFeatures:MultiCell');
 
 	if(! $self->{'multicell_set'}){
-	  warn('Could not retrieve current default RegulatoryFeatures:MuiltiCell FeatureSet');
+	  warn('Could not retrieve current default RegulatoryFeatures:MultiCell FeatureSet');
 	}
   }
 
@@ -275,13 +275,22 @@ sub _columns {
   my $self = shift;
 
   return qw(
-			rf.regulatory_feature_id rf.seq_region_id
-			rf.seq_region_start      rf.seq_region_end
-			rf.seq_region_strand     rf.bound_start_length
-			rf.bound_end_length      rf.display_label
-			rf.feature_type_id       rf.feature_set_id
-			rf.stable_id             rf.binary_string
-			rf.projected             ra.attribute_feature_id
+			rf.regulatory_feature_id 
+      rf.seq_region_id
+			rf.seq_region_start      
+      rf.seq_region_end
+			rf.seq_region_strand     
+      rf.bound_start_length
+			rf.bound_end_length      
+      rf.display_label
+			rf.feature_type_id       
+      rf.feature_set_id
+			rf.stable_id             
+      rf.binary_string
+			rf.projected             
+      rf.has_evidence
+			rf.cell_type_count       
+      ra.attribute_feature_id
 			ra.attribute_feature_table
 	   );
 }
@@ -351,26 +360,44 @@ sub _objs_from_sth {
   my $stable_id_prefix = $self->stable_id_prefix;
 
 	my (
-	    $dbID,                  $efg_seq_region_id,
-	    $seq_region_start,      $seq_region_end,
-	    $seq_region_strand,     $bound_start_length,
-      $bound_end_length,  $display_label,
-      $ftype_id,              $fset_id,
-      $stable_id,             $attr_id,
-      $attr_type,             $bin_string,
-      $projected
+	    $dbID,                  
+      $efg_seq_region_id,
+	    $seq_region_start,      
+      $seq_region_end,
+	    $seq_region_strand,     
+      $bound_start_length,
+      $bound_end_length,  
+      $display_label,
+      $ftype_id,              
+      $fset_id,
+      $stable_id,             
+      $attr_id,
+      $attr_type,             
+      $bin_string,
+      $projected,             
+      $has_evidence,
+      $cell_type_count
      );
 
 	$sth->bind_columns
     (
-     \$dbID,              \$efg_seq_region_id,
-     \$seq_region_start,  \$seq_region_end,
-     \$seq_region_strand, \$bound_start_length,
-     \$bound_end_length,  \$display_label,
-     \$ftype_id,          \$fset_id,
-     \$stable_id,         \$bin_string,
-     \$projected,         \$attr_id,
-     \$attr_type
+     \$dbID,              
+     \$efg_seq_region_id,
+     \$seq_region_start,  
+     \$seq_region_end,
+     \$seq_region_strand, 
+     \$bound_start_length,
+     \$bound_end_length,  
+     \$display_label,
+     \$ftype_id,          
+     \$fset_id,
+     \$stable_id,         
+     \$bin_string,
+     \$projected,         
+     \$has_evidence,
+     \$cell_type_count,
+     \$attr_id,
+     \$attr_type,
     );
 
 	my ($asm_cs, $cmp_cs, $asm_cs_name);
@@ -583,6 +610,8 @@ sub _objs_from_sth {
           'set'            => $fset_hash{$fset_id},
           'feature_type'   => $ftype_hash{$ftype_id},
           'stable_id'      => $sid,
+          'has_evidence'   => $has_evidence,
+          'cell_type_count'=> $cell_type_count,
          });
 
 	  }
@@ -597,7 +626,6 @@ sub _objs_from_sth {
 
   #handle last record
   if ($reg_feat) {
-
     $reg_feat->attribute_cache(\%reg_attrs);
     push @features, $reg_feat;
   }
@@ -637,13 +665,21 @@ sub store{
 
   my $sth = $self->prepare("
 		INSERT INTO regulatory_feature (
-			seq_region_id,         seq_region_start,
-			seq_region_end,        bound_start_length,
-			bound_end_length,      seq_region_strand,
-      display_label,         feature_type_id,
-      feature_set_id,        stable_id,
-      binary_string,         projected
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
+			seq_region_id,         
+      seq_region_start,
+			seq_region_end,        
+      bound_start_length,
+			bound_end_length,      
+      seq_region_strand,
+      display_label,         
+      feature_type_id,
+      feature_set_id,        
+      stable_id,
+      binary_string,         
+      projected,
+      has_evidence,          
+      cell_type_count
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
 
  #bound_seq_region_start,	bound_seq_region_end
 
@@ -691,7 +727,9 @@ sub store{
 	$sth->bind_param(9,  $rf->feature_set->dbID,   SQL_INTEGER);
 	$sth->bind_param(10, $sid,                     SQL_INTEGER);
 	$sth->bind_param(11, $rf->binary_string,       SQL_VARCHAR);
-	$sth->bind_param(12, $rf->is_projected,        SQL_BOOLEAN);
+  $sth->bind_param(12, $rf->is_projected,        SQL_BOOLEAN);
+  $sth->bind_param(13, $rf->has_evidence,        SQL_BOOLEAN);
+	$sth->bind_param(14, $rf->cell_type_count,     SQL_INTEGER);
 
 	#Store and set dbID
 	$sth->execute;

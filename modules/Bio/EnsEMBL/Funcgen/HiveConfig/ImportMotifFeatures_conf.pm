@@ -60,20 +60,38 @@ sub default_options {
   my ($self) = @_;
   return
     {
-     'ensembl_cvs_root_dir' => $ENV{'SRC'},
+     %{$self->SUPER::default_options},    
+    'hive_root_dir' => $ENV{'SRC'}.'/ensembl-hive',
      # some Compara developers might prefer $ENV{'HOME'}.'/ensembl_main'
+    'pipeline_name' => $ENV{'PDB_NAME'},
 
-     'pipeline_db' =>
-     {
-      -host   => $self->o('host'),
-      -port   => $self->o('port'),
-      -user   => $self->o('user'),
-      -pass   => $self->o('pass'),
-      -dbname => $ENV{'USER'}.'_motif_import_'.$self->o('dbname'),
-     },
+    #'pipeline_db' =>
+    # {
+    #  -host   => $self->o('host'),
+    #  -port   => $self->o('port'),
+    #  -user   => $self->o('user'),
+    #  -pass   => $self->o('pass'),
+    #  -driver => 'mysql',
+    #  -dbname => $ENV{'PDB_NAME'},
+    # },
+
+#Will need to define this below if we want access to it as a param
+    pipeline_db => 
+    {
+     #  test => $self->o('GRR'),
+      #CR enable different db params from output db
+     -host   => $self->o('host'),
+     -port   => $self->o('port'),
+     -user   => $self->o('user'),
+     -pass   => $self->o('pass'),
+     -dbname => $self->o('ENV', 'PDB_NAME'),
+     -driver => 'mysql',
+     #todo deal with this in the env and don't corrupt pipeline_name add $ENV{USER}?
+    },
+
 
      #Need to change this to use $ENV{OUT_ROOT} so we can switch scratch usage easily
-     'output_dir' => '/lustre/scratch103/ensembl/funcgen/data_home/output/'.$self->o('dbname'),
+     'output_dir' => undef,
      'slices'     => '',
 
 	 };
@@ -92,10 +110,10 @@ sub resource_classes {
     {
      'default'                    => { 'LSF' => '' },
      'urgent'                     => { 'LSF' => '-q yesterday' },
-     'normal_monitored'           => { 'LSF' => "-M1000000 -R\"select[$ENV{LSF_RESOURCE_HOST}<1000 && mem>1000] rusage[$ENV{LSF_RESOURCE_HOST}=10:duration=10:decay=1,mem=1000]\"" },
+     'normal_monitored'           => { 'LSF' => "-M1000 -R\"select[$ENV{LSF_RESOURCE_HOST}<1000 && mem>1000] rusage[$ENV{LSF_RESOURCE_HOST}=10:duration=10:decay=1,mem=1000]\"" },
      'long_monitored'             => { 'LSF' => "-q long -R\"select[$ENV{LSF_RESOURCE_HOST}<1000] rusage[$ENV{LSF_RESOURCE_HOST}=10:duration=10:decay=1]\"" },
-     'long_high_memory'           => { 'LSF' => '-q long -M4000000 -R"select[mem>4000] rusage[mem=4000]"' },
-     'long_monitored_high_memory' => { 'LSF' => "-q long -M4000000 -R\"select[$ENV{LSF_RESOURCE_HOST}<600 && mem>4000] rusage[$ENV{LSF_RESOURCE_HOST}=12:duration=5:decay=1,mem=4000]\"" },
+     'long_high_memory'           => { 'LSF' => '-q long -M4000 -R"select[mem>4000] rusage[mem=4000]"' },
+     'long_monitored_high_memory' => { 'LSF' => "-q long -M4000 -R\"select[$ENV{LSF_RESOURCE_HOST}<600 && mem>4000] rusage[$ENV{LSF_RESOURCE_HOST}=12:duration=5:decay=1,mem=4000]\"" },
 
 #     0 => { -desc => 'default',          'LSF' => '' },
 #     1 => { -desc => 'urgent',           'LSF' => '-q yesterday' },
@@ -120,7 +138,7 @@ sub pipeline_wide_parameters {
   my ($self) = @_;
   return {
 
-	  'pipeline_name'   => $self->o('pipeline_db', '-dbname'),  # name used by the beekeeper to prefix job names on the farm
+	  'pipeline_name'   => $self->o('pipeline_name'),  # name used by the beekeeper to prefix job names on the farm
 	  'hive_output_dir' => $self->o('output_dir')."/motif_features/hive_output",
 	  'output_dir' => $self->o('output_dir')."/motif_features/results",
 
@@ -190,7 +208,7 @@ sub pipeline_analyses {
       -logic_name    => 'run_import',
       -module        => 'Bio::EnsEMBL::Funcgen::RunnableDB::ImportMotifFeatures',
       -parameters    => { },
-      -hive_capacity => 1,   # allow several workers to perform identical tasks in parallel
+      -analysis_capacity => 50,   # allow several workers to perform identical tasks in parallel
       -batch_size    => 1,
       -input_ids     => [
                          #For the moment it only receives the matrix, and deduces feature_type(s) from there...

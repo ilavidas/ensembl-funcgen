@@ -46,7 +46,7 @@ package Bio::EnsEMBL::Funcgen::Importer;
 use strict;
 use warnings;
 use File::Path;
-use Bio::EnsEMBL::Funcgen::Utils::EFGUtils qw( get_date open_file run_system_cmd);
+use Bio::EnsEMBL::Funcgen::Utils::EFGUtils qw( get_date open_file run_system_cmd validate_path );
 use Bio::EnsEMBL::Utils::Exception         qw( throw deprecate );
 use Bio::EnsEMBL::Utils::Argument          qw( rearrange );
 use Bio::EnsEMBL::Funcgen::Experiment;
@@ -87,7 +87,7 @@ use vars qw(@ISA);
                     -input_dir  ?????????
                     -import_dir  ???????
                     -norm_dir    ??????
-                    -fasta dump FASTA flag (default =0)
+                    -fasta dump FASTA flag (default = 0)
                     -array_set Flag to treat all chip designs as part of same array (default = 0)
                     -array_name Name for array set
                     -array_file Path of array file to import for sanger ENCODE array
@@ -123,12 +123,12 @@ sub new{
   my ($format, $vendor, $group, $location, $contact,
       $array_name, $array_set, $array_file,
       $exp_date, $desc, $design_type, $batch_job, $farm, $prepared,
-      $norm_method, $old_dvd_format, $parser_type, $set)
+      $norm_method, $old_dvd_format, $parser_type, $set, $input_files)
     = rearrange(['FORMAT', 'VENDOR', 'GROUP', 'LOCATION', 'CONTACT', 
                  'ARRAY_NAME', 'ARRAY_SET', 'ARRAY_FILE', 
                  'EXPERIMENT_DATE', 'DESCRIPTION', 'DESIGN_TYPE', 
                  'BATCH_JOB', 'FARM', 'PREPARED', 'NORM_METHOD', 
-                 'OLD_DVD_FORMAT', 'PARSER', 'SET'], @_);
+                 'OLD_DVD_FORMAT', 'PARSER', 'SET', 'INPUT_FILES'], @_);
 
 
   #WARNING
@@ -143,25 +143,27 @@ sub new{
   #as well as set_config methods?
 
   my $parser_error;
- 
-  for my $vendor_parser( ($vendor, $parser_type) ) {
-    next if ! defined $vendor_parser;
-    $vendor_parser =  ucfirst(lc($vendor_parser));
     
-    eval {require "Bio/EnsEMBL/Funcgen/Parsers/${vendor_parser}.pm";};
+  if(! ($vendor || $parser_type)){
+    throw('Must define a -vendor or a -parser parameter');  
+  }
  
-    if ($@) {
+  foreach($vendor, $parser_type) {
+    next if ! defined $_;
+    my $vendor_parser =  ucfirst(lc($_));
+   
+    if ( ! eval {require "Bio/EnsEMBL/Funcgen/Parsers/${vendor_parser}.pm"; 1}) {
       #Don't warn/throw yet as we might have a standard parser format
-      $parser_error .= "$@\nThere is no valid parser:\tBio/EnsEMBL/Funcgen/Parsers/${vendor_parser}.pm";
+      $parser_error .= "There is no valid parser:\tBio/EnsEMBL/Funcgen/Parsers/${vendor_parser}.pm\n$@";
     }
     else{ 
       $parser_type = $vendor_parser;
       undef $parser_error;
       last;
     }
-
   }
   
+ 
   if(defined $parser_error){
     throw($parser_error."\nPlease define a valid -vendor or -parser"); 
   }
@@ -172,10 +174,8 @@ sub new{
   #change this to be called explicitly from the load script?
 
   #### Create object from parent class
-
   my $self = $class->SUPER::new(@_);
     
- 
   #These are all specific to certain parser or import types i.e. InputSet/ResultSet
   #Need to move these to BaseImporter new
   #and validate only when we try to init_  certain import
@@ -207,9 +207,27 @@ sub new{
   #between new and init methods?
   
   
+  $self->vendor($vendor || $parser_type);
+
+  if(! $self->input_files($input_files)){
+  
+    if(! defined $self->get_dir('input')){ 
+    #Set default input_dir if we have not specified files
+     #This is dependant on name which is not mandatory yet!
+     #data_dir defaults to $EFG_DATA from environment
+      $self->{'input_dir'} = $self->get_dir("data").'/input/'.
+      $self->{'param_species'}.'/'.$self->vendor().'/'.$self->name();   
+    }
+    else{  
+      validate_path($self->get_dir('input'), 1); #dir flag
+    }
+  }
+    
+
+
   
   #Generic (potentially)
-    $self->description($desc) if $desc; #experiment? or set?
+  $self->description($desc) if $desc; #experiment? or set?
   $self->farm($farm) if $farm;
   $self->batch_job($batch_job);
   $self->prepared($prepared); #This is really only for pre-processing files
@@ -225,7 +243,6 @@ sub new{
 
 
   #Array specific stuff
-  $self->vendor($vendor);
   $self->array_name($array_name) if $array_name;
   $self->array_set($array_set) if $array_set;
   $self->array_file($array_file) if $array_file;
@@ -243,11 +260,16 @@ sub new{
   $self->set_config;
 
 
+
+
   $self->debug(2, "Importer class instance created.");
   $self->debug(3, undef, $self);
     
   return ($self);
 }
+
+
+
 
 #init method kept separate from new due to differing madatory check and set up
 
@@ -282,6 +304,9 @@ sub init_array_import{
 
   $self->create_output_dirs('caches', 'fastas');
 
+  
+
+
 
 }
 
@@ -309,7 +334,7 @@ sub init_experiment_import{
   #Currently we only have array and experiment import, both of which should have names
   #Make mandatory?
 
-  foreach my $tmp ("group", "data_dir") { #name now generically mandatory
+  foreach my $tmp ("experimental_group", "data_dir") { #name now generically mandatory
     throw("Mandatory arg $tmp not been defined") if (! defined $self->{$tmp});
   }
   #Should we separate path on group here too, so we can have a dev/test group?
@@ -317,7 +342,7 @@ sub init_experiment_import{
   #Create output dirs
   #This should be moved to the Parser to avoid generating directories which are needed for different imports
   $self->create_output_dirs('raw', 'norm', 'caches', 'fastas');
-  throw("No result_files defined.") if (! defined $self->result_files());
+  throw("No result_files defined.") if (! defined $self->input_files());
 
   #Log input files
   #if (@{$self->result_files()}) {
@@ -362,25 +387,23 @@ sub init_experiment_import{
   } else {                      # (recover && exp) || (recover  && ! exp)
 
 
-    $exp = Bio::EnsEMBL::Funcgen::Experiment->new(
-                                                  -EXPERIMENTAL_GROUP => $self->{egroup},
-                                                  -NAME  => $self->name(),
-                                                  -DATE  => $self->experiment_date(),
-                                                  -PRIMARY_DESIGN_TYPE => $self->design_type(),
-                                                  -DESCRIPTION => $self->description(),
-                                                  -ADAPTOR => $self->db->get_ExperimentAdaptor(),
-                                                 );
+    $exp = Bio::EnsEMBL::Funcgen::Experiment->new
+     (-EXPERIMENTAL_GROUP  => $self->{egroup},
+      -NAME                => $self->name,
+      -DATE                => $self->experiment_date,
+      -PRIMARY_DESIGN_TYPE => $self->design_type,
+      -DESCRIPTION         => $self->description,
+      -CELL_TYPE           => $self->cell_type,
+      -FEATURE_TYPE        => $self->feature_type);
 
     ($exp) =  @{$exp_adaptor->store($exp)};
   }
 
 
-  $self->experiment($exp);
-
   #remove and add specific report, this is catchig some Root stuff
   #$self->log("Initiated efg import with following parameters:\n".Data::Dumper::Dumper(\$self));
 
-  return;
+  return $self->experiment($exp);
 }
 
 
@@ -398,9 +421,9 @@ sub init_experiment_import{
 =cut
 
 sub validate_group{
-  my ($self) = shift;
+  my $self = shift;
 
-  my $egroup = $self->db->get_ExperimentalGroupAdaptor->fetch_by_name($self->group);
+  my $egroup = $self->db->get_ExperimentalGroupAdaptor->fetch_by_name($self->experimental_group);
 
   if (! defined $egroup) {
 
@@ -414,6 +437,8 @@ sub validate_group{
   }
 
   $self->{egroup} = $egroup;
+
+  #$self->{experimental_group} = $egroup;
 
   return;
 }
@@ -472,17 +497,17 @@ sub create_output_dirs{
 =cut
 
 sub vendor{
-  my ($self) = shift;
+  my $self   = shift;
+  my $vendor = shift;
 
-  if (@_) {
-    $self->{'vendor'} = shift;
-    $self->{'vendor'} = uc($self->{'vendor'});
+  if(defined $vendor) {
+    $self->{vendor} = uc($vendor);
   }
-  elsif(! defined $self->{'vendor'}){
+  elsif(! defined $self->{vendor}){
    throw('Must specify a -vendor'); 
   }
 
-  return $self->{'vendor'};
+  return $self->{vendor};
 }
 
 
@@ -1069,6 +1094,7 @@ sub cache_slice{
   $region_name = "MT" if $region_name eq "M";
 
   if (! exists ${$self->{'seen_slice_cache'}}{$region_name}) {
+    $self->debug(1, 'Cacheing slice: '.$region_name); 
     my $slice = $self->slice_adaptor->fetch_by_region($cs_name, $region_name);
 
     #Set seen cache so we don't try this again
@@ -1088,6 +1114,7 @@ sub cache_slice{
     $self->{'slice_cache'}->{$region_name} = $slice;
   }
 
+  
   if ($total_count && exists ${$self->{'seen_slice_cache'}}{$region_name}) {
     #This is an InputSet specific method
     $self->count('total_features') if $self->can('count');
@@ -1113,8 +1140,7 @@ sub cache_slice{
 
 sub slice_cache{
   my $self = shift;
-
-  return $self->{'slice_cache'};
+  return $self->{'slice_cache'} || {};
 }
 
 

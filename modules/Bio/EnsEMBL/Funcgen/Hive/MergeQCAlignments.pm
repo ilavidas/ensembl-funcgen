@@ -28,7 +28,7 @@ Bio::EnsEMBL::Hive::Funcgen::MergeQCAlignments
 
 =head1 DESCRIPTION
 
-
+Merges bam alignments from split (replicate or merged) fastq files.
 
 =cut
 
@@ -38,107 +38,164 @@ use warnings;
 use strict;
 
 use Bio::EnsEMBL::Utils::Exception         qw( throw );
-use Bio::EnsEMBL::Funcgen::Utils::EFGUtils qw( run_system_cmd merge_bams );
+use Bio::EnsEMBL::Funcgen::Utils::EFGUtils qw( run_system_cmd );
+use Bio::EnsEMBL::Funcgen::Sequencing::SeqTools;# merge_bams 
 
 use base qw( Bio::EnsEMBL::Funcgen::Hive::BaseDB );
 
-#TODO... use and update the tracking database dependant on no_tracking...
+#TODO
+#1 Reimplement repository support
+#2 QC Status handling/setting?
+#3 Use and update the tracking database dependant on no_tracking
+#4 Drop signal flow_mode in favour of using result_set_groups as a proxy. 
+#  It is kinda nice to have this flow_mode vs result_set_group validation though.
+#5 Make archive optional, i.e. remove mandatory flag? 
 
-#todo
-# Reimplement repository support
-# Status handling/setting?
-
+my %valid_flow_modes = (replicate => undef,
+                        merged    => undef,
+                        signal    => undef); 
 
 sub fetch_input {  
   my $self = shift;
+  #Set some module defaults
+  $self->param('disconnect_if_idle', 1);
+  
   $self->SUPER::fetch_input();
   my $rset = $self->fetch_Set_input('ResultSet');
+  $self->param_required('archive_root');#Do this here to fail early
+  #make this optional, as not everybody will want
+  
   $self->get_param_method('output_dir', 'required');
-  $self->get_param_method('bam_files',  'required');
-  $self->get_param_method('set_prefix', 'required');#was chunk_fiule_prefix in MergeChunkResultSetFastqs
+  $self->get_param_method('bam_files',  'silent');
+  $self->get_param_method('fastq_files',  'silent');
+    
+  if((! $self->bam_files ) && $self->fastq_files){
+    #$self->helper->debug(1, "Generating bam file names from fastqs:\n".join("\n", @{$self->fastq_files}));
+    my $bam_file;
+    $self->bam_files([ map {($bam_file = $_) =~ s/\.fastq_([0-9]+)$/.$1.bam/o; $bam_file} @{$self->fastq_files} ]);
+    #$self->helper->debug(1, "Fastqs now:\n".join("\n", @{$self->fastq_files}));
+    #$self->helper->debug(1, "Bams now:\n".join("\n", @{$self->bam_files}));
+   
+  }
+  elsif(! $self->bam_files){
+    $self->throw_no_retry('No bam_files or fastq_files have been defined');    
+  }
+  
+  $self->get_param_method('set_prefix', 'required');  #This is control specific
   my $flow_mode = $self->get_param_method('flow_mode',  'required');
+  $self->set_param_method('run_controls', 0); 
+  
+  
+  if(! exists $valid_flow_modes{$flow_mode}){
+    throw("$flow_mode is now a valid flow_mode parameter, please specify one of:\t".
+      join(' ', keys %valid_flow_modes));  
+  }
+  elsif($flow_mode eq 'signal'){
+    $self->get_param_method('result_set_groups', 'required');
+    $self->run_controls(1); 
+  }
+  elsif($self->get_param_method('result_set_groups', 'silent')){
+    throw("The $flow_mode flow mode is not valid for use with result_set_groups"); 
+  }
+  elsif($flow_mode eq 'replicate'){
+    $self->get_param_method('permissive_peaks', 'required');
+  }
+  
   #could have recreated output_dir and merged_file_name from ResultSet and run_controls
   #as we did in MergeChunkResultSetFastqs, but passed for convenience
   $self->sam_header($rset->cell_type->gender);
- 
-  if($flow_mode ne 'signal'){
-    $self->get_param_method('result_set_groups', 'required');
-  }
-  
  
   #my $repository = $self->_repository();
   #if(! -d $repository){
   #  system("mkdir -p $repository") && throw("Couldn't create directory $repository");
   #}
 
-    
+  $self->init_branching_by_analysis;
   return;
 }
 
-#Is the cating of rep numbers going to cause problems?
-#The Peaks and Collections pipelines need to be able to 
-#recreate these file names.
-#in fact we need to share the same code used by get_alignment_file_by_ResultSet_formats
-#which does not use the rep numbers
-#This may be risky
-#In the event of a disconnect between update of an ResultSet with new reps
-#and running the peaks/collections on a pre-exitingalignment file(without new rep)
-#This could also be managed with a ResultSet status. Any updates to the ResultSet
-#would require unsetting the ALIGNED status
 
 sub run {
-  my $self         = shift;
-  my $rset         = $self->ResultSet;
-  my $sam_header   = $self->sam_header;
-  my @bam_files    = @{$self->bam_files};  
+  my $self       = shift;
+  my $rset       = $self->ResultSet;
+  my $sam_header = $self->sam_header;
+  my $cmd;
   
-  my $bam_file     = $self->output_dir.'/'.$self->set_prefix.'.unfiltered.bam';
-  #my $filtered_bam = $self->output_dir.'/'.$self->set_prefix.'.bam';
+  ### CLEAN FASTQS ###
+  if($self->fastq_files){
+    #Run with no exit flag so we don't fail on retry
+    $cmd = 'rm -f '.join(' ', @{$self->fastq_files});
+    $self->helper->debug(3, "Removing fastq chunks:\n$cmd");
+    run_system_cmd($cmd, 1);
+  }
   
-  #sam_header here is really optional if is probably present in each of the bam files
-  merge_bams($bam_file, \@bam_files, {sam_header => $self->sam_header,
-                                      remove_duplicates => 1});
+  ### MERGE BAMS ###
+  my $file_prefix  = $self->get_alignment_path_prefix_by_ResultSet($rset, $self->run_controls); 
+  my $unfiltered_bam     = $file_prefix.'.unfiltered.bam';
+  $self->helper->debug(1, "Merging bams to:\t".$unfiltered_bam); 
+  #sam_header here is really optional if is probably present in each of the bam files but maybe incomplete 
+  my @bam_files  = @{$self->bam_files};
+     
+  merge_bams($unfiltered_bam, 
+             $self->sam_ref_fai($rset->cell_type->gender), 
+             \@bam_files, 
+             {debug          => $self->debug});
   
-
-
-#todo convert this to wite to a result_set_report table
-
-  my $alignment_log = $self->output_dir.'/'.$self->set_prefix.".alignment.log";
-
-  my $cmd="echo \"Alignment QC - total reads as input: \" >> ${alignment_log}".
-    ";samtools flagstat $bam_file | head -n 1 >> ${alignment_log}".
-    ";echo \"Alignment QC - mapped reads: \" >> ${alignment_log} ".
-    ";samtools view -u -F 4 $bam_file | samtools flagstat - | head -n 1 >> ${alignment_log}".
-    "; echo \"Alignment QC - reliably aligned reads (mapping quality >= 1): \" >> ${alignment_log}".
-    ";samtools view -u -F 4 -q 1 $bam_file | samtools flagstat - | head -n 1 >> ${alignment_log}";
+  ### ALIGNMENT REPORT ### 
+  #todo convert this to wite to a result_set_report table
+  my $alignment_log = $file_prefix.".alignment.log";
+  $cmd ='echo -en "Alignment QC - samtools flagstat output:\n" > '.$alignment_log.
+    ";samtools flagstat $unfiltered_bam >> $alignment_log;".
+    'echo -en "Alignment QC - mapped reads:\t\t\t\t\t" >> '.$alignment_log.
+    ";samtools view -u -F 4 $unfiltered_bam | samtools flagstat - | head -n 1 >> $alignment_log;".
+    ' echo -en "Alignment QC - reliably aligned reads (mapping quality >= 1):\t" >> '.$alignment_log.
+    ";samtools view -u -F 4 -q 1 $unfiltered_bam | samtools flagstat - | head -n 1 >> $alignment_log";
   #Maybe do some percentages?
+  $self->helper->debug(1, "Generating alignment log with:\n".$cmd);
   run_system_cmd($cmd);
-  
-  #my $repository = $self->_repository();
-  #move("${file_prefix}.sorted.bam","${repository}/${set_name}.samse.bam");
-  #my $convert_cmd =  "samtools view -h ${file_prefix}.sorted.bam | gzip -c - > ${repository}/${set_name}.samse.sam.gz";
-
-  run_system_cmd("rm -f @bam_files");
-
-
+ 
   #Filter and QC here FastQC or FASTX?
   #filter for MAPQ >= 15 here? before or after QC?
   #PhantomPeakQualityTools? Use estimate of fragment length in the peak calling?
 
-  warn "Need to implement post alignment QC here. Filter out MAPQ <16. FastQC/FASTX/IDR?/PhantomPeakQualityTools frag length?";
-  #Add ResultSet status setting here!
-  #ALIGNED
+  warn "Need to implement post alignment QC here. Filter out MAPQ <16. FastQC/FASTX/PhantomPeakQualityTools frag length?";
+  #todo Add ResultSet status setting here!
   #ALIGNMENT_QC_OKAY
+  #Assuming all QC has passed, set status
+  
+  if($self->run_controls){
+    my $exp = $rset->experiment(1);#control flag
+    $exp->adaptor->store_status('ALIGNED_CONTROL', $exp);
+    $exp->adaptor->revoke_status('ALIGNING_CONTROL', $exp, 1);#validate status flag
+  }
+  else{
+    $rset->adaptor->store_status('ALIGNED', $rset);
+    #Do not set IMPORTED here, as this signifies that the collections
+    #have already been written(i.e what would have been importing data into the DB
+    #before we moved it out to flat files)
+  }
 
-
-
-
-
-  my $flow_mode    = $self->flow_mode;
+  #filter file here to prevent race condition between parallel peak
+  #calling jobs which share the same control
+  #This will also check the checksum we have just generated, which is a bit redundant
+  $self->get_alignment_files_by_ResultSet_formats($rset, ['bam'], 
+                                                  $self->run_controls, 
+                                                  undef, 
+                                                  'bam');#Filter from format
+                                                  
+  #This is really only unmapped and duplicate reads (as we have dropped MT filtering)
+  #i.,e. unique_mapping
+  #so we can drop archiving of this for now, so long as we maintain the 
+  #alignement log for the unfiltered file
+  #We would have to re-instate an unfiltered file if we ever introduce
+  #more filtering filtering                                                
+  $self->archive_files([$unfiltered_bam, $unfiltered_bam.'.CHECKSUM'], 1);#mandatory flag
+  
   my %batch_params = %{$self->batch_params};
+  my $flow_mode    = $self->flow_mode;
   
   if($flow_mode ne 'signal'){
-    #Data flow to DefineMergedOutputSet or run_SWEmbl_R0005_replicate
+    #flow_mode is merged or replicate, which flows to DefineMergedOutputSet or run_SWEmbl_R0005_replicate
     
     #This is a prime example of pros/cons of using branch numbers vs analysis names
     #Any change in the analysis name conventions in the config will break this runnable
@@ -149,16 +206,17 @@ sub run {
     #Can of course just piggy back an analysis on the same branch
     #But that will duplicate the jobs between analyses on the same branch
     
-    my %output_id = (set_type    => 'ResultSet',
+    my %output_id = (garbage     => \@bam_files,
+                     set_type    => 'ResultSet',
                      set_name    => $self->ResultSet->name,
                      dbID        => $self->ResultSet->dbID);
     my $lname     = 'DefineMergedDataSet';  
     
-    if($flow_mode eq 'Replicate'){
+    if($flow_mode eq 'replicate'){
       $output_id{peak_analysis} = $self->permissive_peaks;
       $lname                    = 'run_'.$self->permissive_peaks.'_replicate';  
     }
-    
+        
     $self->branch_job_group($lname, [{%batch_params, %output_id}]);
   }
   else{ #Run signal fastqs
@@ -167,24 +225,32 @@ sub run {
     
     #This bit is very similar to some of the code in DefineResultSets
     #just different enough not to be subbable tho 
-
+    
     foreach my $rset_group(keys %{$rset_groups}){
-      my @fan_jobs;
-        
+      my @rep_or_merged_jobs;    
+      #If $rset_group is set to merged in DefineResultSets (dependant on ftype and run_idr)
+      #Then the dbIDs will be different merged result sets, and we won't be specifying a funnel
+      #else $rset_group will be the parent rset name and the dbIDs will be the replicate rset
+      #and we will specify a PreprocessIDR funnel
+           
       for my $i(0...$#{$rset_groups->{$rset_group}{dbIDs}}){
-        push @fan_jobs, {%batch_params,
-                         set_type    => 'ResultSet',
-                         set_name    => $rset_groups->{$rset_group}{set_names}->[$i],
-                         dbID        => $rset_groups->{$rset_group}{dbIDs}->[$i]};
+        push @rep_or_merged_jobs, 
+          {%batch_params,
+           garbage     => \@bam_files, 
+           #Passing rep bam here prevent us from redoing the peak calling
+           #Disable? Or wait till we restructure and only ever keep the rep bams
+           set_type    => 'ResultSet',
+           set_name    => $rset_groups->{$rset_group}{set_names}->[$i],
+           dbID        => $rset_groups->{$rset_group}{dbIDs}->[$i]};
       }
          
       my $branch = ($rset_group eq 'merged') ? 
         'Preprocess_'.$align_anal.'_merged' : 'Preprocess_'.$align_anal.'_replicate';   
       
-      my @job_group = ($branch, \@fan_jobs);   
+      my @job_group = ($branch, \@rep_or_merged_jobs);   
          
-      if($rset_group ne 'merged'){ #Add RunIDR semaphore
-        push @job_group, ('RunIDR', 
+      if($rset_group ne 'merged'){ #Add PreprocessIDR semaphore
+        push @job_group, ('PreprocessIDR', 
                           [{%batch_params,
                             dbIDs     => $rset_groups->{$rset_group}{dbIDs},
                             set_names => $rset_groups->{$rset_group}{set_names},
