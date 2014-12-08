@@ -29,6 +29,7 @@ sub main {
 
   _get_cmd_line_options($cfg);
 
+
   _connect_to_trackingDB($cfg);
 
   # _lock_meta_table($cfg,'dbh_tracking',);
@@ -297,7 +298,7 @@ sub _migrate {
       _migrate_regulatory_feature($cfg, $tr_ds);
     }
     else{
-      _migrate_feature_set($cfg, $tr_ds);
+       _migrate_feature_set($cfg, $tr_ds);
     }
 
     # # say $tr_ds->name; next;
@@ -305,7 +306,7 @@ sub _migrate {
 
     # # last if($c == 3); $c++;
     # $tr->{data_set} = $tr_ds;
-    die;
+    
 
     # _get_tracking_release_objects($cfg, $tr_ds);
     # my $name = $tr->{experiment}->name;
@@ -399,8 +400,8 @@ sub _migrate_regulatory_feature {
       _compare_feature_type($tr_ds, $dev_ds, $tr_ds->feature_type, $dev_ft);
       $dev->{feature_type} = $dev->feature_type
     }
-
   }
+  die;
 }
 
 
