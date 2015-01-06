@@ -16,7 +16,7 @@ use Bio::EnsEMBL::Funcgen::DBSQL::TrackingAdaptor;
 use Bio::EnsEMBL::Utils::SqlHelper;
 
 
-use constant CONFIG  => 'sequencing.config.ini';
+use constant CONFIG  => 'migration.config.ini';
 select((select(STDOUT), $|=1)[0]);
 
 main();
@@ -37,8 +37,8 @@ sub main {
 
   # _lock_meta_table($cfg,'dbh_dev',);
   _get_trackingDB_adaptors($cfg);
-
   _get_devDB_adaptors($cfg);
+
   #  print dump_data($cfg->{dev_adaptors},1,1);die;
   _get_current_data_sets($cfg);
     say "Current DataSeta: " . scalar(@{$cfg->{release}->{data_set}});
@@ -298,6 +298,7 @@ sub _migrate {
       _migrate_regulatory_feature($cfg, $tr_ds);
     }
     else{
+      say "Migrating FeatureSet: " . $tr_ds->name;
        _migrate_feature_set($cfg, $tr_ds);
     }
 
@@ -327,6 +328,7 @@ sub _migrate_feature_set {
 
   my $dev_ds = $cfg->{dev_adaptors}->{ds}->fetch_by_name($tr_ds->name);
   if(defined $dev_ds){
+    say "Comparing DataSets";
     _compare_data_set($tr_ds, $dev_ds);
 
   }
@@ -337,19 +339,19 @@ sub _migrate_feature_set {
     
     my $dev_rs = $cfg->{dev_adaptors}->{rs}->fetch_by_name($tr_rs->name);
     if(defined $dev_rs){
+      say "Comparing DataSets";
       _compare_result_set($cfg, $tr_ds, $dev_ds, $tr_rs, $dev_rs);
     }
     
     my $tr_rs_exp = $tr_rs->experiment;
     my $dev_exp = $cfg->{dev_adaptors}->{ex}->fetch_by_name($tr_rs_exp->name);
     if(defined $dev_exp){
+      say "Comparing Experiments";
       _compare_experiment($cfg, $tr_rs, $dev_rs, $tr_rs_exp, $dev_exp);
     }
     
     # say "RS Exp:" .$tr_rs->experiment->name;
   }
-  die;
-
 }
 
 
