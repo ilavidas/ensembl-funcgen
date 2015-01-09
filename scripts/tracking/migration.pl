@@ -355,8 +355,6 @@ sub _migrate_feature_set {
 }
 
 
-
-
 sub _migrate_regulatory_feature {
   my ($cfg, $tr_ds) = @_;
 
@@ -1581,6 +1579,7 @@ sub _compare_input_subset {
 
 
   my $error;
+  
   $error = _check_tmp($tr_iss->compare_to($dev_iss,'-1'));
   if(defined $error){
     my $msg;
