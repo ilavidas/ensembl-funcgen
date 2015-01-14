@@ -1,7 +1,7 @@
 
 =head1 LICENSE
 
-Copyright [1999-2014] Wellcome Trust Sanger Institute and the EMBL-European Bioinformatics Institute
+Copyright [1999-2015] Wellcome Trust Sanger Institute and the EMBL-European Bioinformatics Institute
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -226,7 +226,7 @@ sub pipeline_analyses {
      -rc_name    => 'default',
      -batch_size => 30, #Should really take ~1min to process each set of replicates
             
-     -parameters => { feature_set_analysis => $self->o('permissive_peaks') },
+     -parameters => { permissive_peaks => $self->o('permissive_peaks') },
       #This will not allow batch override
            
      -flow_into => 
@@ -325,7 +325,7 @@ sub pipeline_analyses {
      -rc_name    => 'default',
      -batch_size => 30, #Should really take ~1min to process each set of replicates
             
-     -parameters => { feature_set_analysis => $self->o('permissive_peaks') },
+     -parameters => { permissive_peaks => $self->o('permissive_peaks') },
       #This will not allow batch override
            
      -flow_into => 
