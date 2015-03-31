@@ -51,6 +51,8 @@ sub main {
 
 }
 
+
+
 sub _unlock_meta_table {
   my	($cfg, $dbh_name)	= @_;
 
@@ -192,7 +194,7 @@ sub _connect_to_devDB {
 sub _connect_to_trackingDB {
   my ($cfg) = @_; 
 
-  say dump_data($cfg->{efg_db},1,1);
+  # say dump_data($cfg->{efg_db},1,1);
   my $db_a = Bio::EnsEMBL::Funcgen::DBSQL::DBAdaptor->new (
     -user       => $cfg->{efg_db}->{user},
     -pass       => $cfg->{efg_db}->{pass},
@@ -285,22 +287,23 @@ sub _get_current_data_sets {
 sub _migrate {
   my ($cfg) = @_;
 
-  my $dev;
-  # say dump_data($cfg->{release}->{data_set},1,1);
+  my ($tr, $dev) = ({},{});
   my $flag_rf = $cfg->{generic}->{regulatory_feature};
   
   DATASET:
   for my $tr_ds(@{$cfg->{release}->{data_set}}) {
     next if($tr_ds->feature_type eq 'RegulatoryFeature' && $flag_rf == 0);
 
-    my $tr->{data_set} = $tr_ds;
+
     if($tr_ds->feature_type eq 'RegulatoryFeature'){
       _migrate_regulatory_feature($cfg, $tr_ds);
     }
     else{
       say "Migrating FeatureSet: " . $tr_ds->name;
-      _migrate_cell_feature_type($cfg,$tr,$dev);
+      $tr->{ds} = $tr_ds;
+      _migrate_cell_feature_type($cfg, $tr, $dev);
       _migrate_feature_set($cfg, $tr, $dev);
+      _store_in_dev($cfg, $tr, $dev);
     }
   }
   return ;
@@ -308,6 +311,81 @@ sub _migrate {
 #-------------------------------------------------------------------------------
 
 
+
+
+
+=head2
+
+  Name       : _migrate_feature_set
+  Arg [1]    :
+  Example    :
+  Description:
+  Returntype :
+  Exceptions :
+  Caller     : general
+  Status     : At risk - not tested
+
+=cut
+
+#-------------------------------------------------------------------------------
+sub _migrate_feature_set {
+  my ($cfg, $tr, $dev) = @_;
+
+  my $dev_ds = $cfg->{dev_adaptors}->{ds}->fetch_by_name($tr->{ds}->name);
+  if(defined $dev_ds){ 
+    _compare_data_set($cfg, $tr->{ds}, $dev->{ds});
+    #avoid $dev->{ds} = undefined
+    $dev->{ds} = $dev_ds;
+  }
+
+  $tr->{fs} = $tr->{ds}->product_FeatureSet;
+  my $dev_fs = $cfg->{dev_adaptors}->{fs}->fetch_by_name($tr->{fs}->name);
+  if(defined $dev_fs){
+    _compare_feature_set($cfg, $tr, $dev);
+    _compare_feature_set_data_set($cfg, $dev_fs, $dev->{ds}, $tr, $dev);
+  }
+
+  $tr->{rs} = $tr->{ds}->get_supporting_sets;
+  foreach my $tr_rs (@{$tr->{rs}}){
+
+    # $cfg->{dba_tracking}->is_stored_and_valid('Bio::EnsEMBL::Funcgen::ResultSet', $tr_rs);
+
+    my $dev_rs = $cfg->{dev_adaptors}->{rs}->fetch_by_name($tr_rs->name);
+    if(defined $dev_rs){
+      _compare_result_sets($cfg, $tr_rs, $dev_rs, $tr, $dev);
+      _compare_result_set_data_set($cfg, $dev_rs, $dev->{ds}, $tr, $dev);
+      push(@{$dev->{rs}}, $dev_rs);
+    }
+
+    $tr->{input_subsets} = $tr_rs->get_support;
+    foreach my $tr_iss (@{$tr->{iss}}){
+      my $dev_iss = $cfg->{dev_adaptors}->{iss}->fetch_by_name($tr_iss->name);
+      if(defined $dev_iss){
+        _compare_input_subset($tr_iss, $dev_iss, $tr, $dev);
+        _compare_input_subset_data_set($cfg, $dev_iss, $dev->{ds}, $tr, $dev);
+        push(@{$dev->{iss}}, $dev_iss);
+      }
+    }
+
+    $tr->{exp} = $tr_rs->experiment;
+    my $dev_exp = $cfg->{dev_adaptors}->{ex}->fetch_by_name($tr->{exp}->name);
+    if(defined $dev_exp){
+      $dev->{exp} = $dev_exp;
+      _compare_experiment($cfg, $tr, $dev);
+      _compare_experiment_data_set($cfg, $dev_exp, $dev->{ds}, $tr, $dev);
+    }
+
+    $tr->{exp_group} = $tr->{exp}->experimental_group;
+    my $eg_name = $tr->{exp_group}->name;
+    my $dev_exp_group = $cfg->{dev_adaptors}->{eg}->fetch_by_name($eg_name);
+
+    if(defined $dev_exp_group){
+      $dev->{exp_group} = $dev_exp_group;
+      _compare_experimental_group($cfg, $tr, $dev);
+    }
+  }
+}
+#-------------------------------------------------------------------------------
 
 ################################################################################
 #                           _migrate_cell_feature_type
@@ -331,105 +409,35 @@ sub _migrate_cell_feature_type {
   my ($cfg, $tr, $dev) = @_;
 
   $tr->{ct} = $tr->{ds}->cell_type;
-  $tr->{ft} = $tr->{fs}->cell_type;
+  $tr->{ft} = $tr->{ds}->feature_type;
 
   my $ct_name = $tr->{ct}->name;
-  $dev->{ct} = $cfg->{dev_adaptors}->{ct}->fetch_by_name($ct_name);
 
-  if(defined $dev->{ct}){
+  my $dev_ct = $cfg->{dev_adaptors}->{ct}->fetch_by_name($ct_name);
+
+  if(defined $dev_ct){
+    $dev->{ct} = $dev_ct;
     _compare_cell_type($cfg, $tr, $dev);
   }
   else{
     $dev->{ct}   = create_Storable_clone ($tr->{ct});
-    ($dev->{ct}) = @{$cfg->{dev_adaptors}->{ct}->store($dev->{$dev->{ct}})};
+    ($dev->{ct}) = @{$cfg->{dev_adaptors}->{ct}->store($dev->{ct})};
   }
 
   my $ft_name = $tr->{ft}->name;
-  $dev->{ft} = $cfg->{dev_adaptors}->{ft}->fetch_by_name($ft_name);
+  my $dev_ft = $cfg->{dev_adaptors}->{ft}->fetch_by_name($ft_name);
 
-  if(defined $dev->{ft}){
-    _compare_feature_type($cfg, $tr, $dev);
+  if(defined $dev_ft){
+    $dev->{ft} = $dev_ft;
+      _compare_feature_type($cfg, $tr, $dev);
   }
   else {
     $dev->{ft}   = create_Storable_clone ($tr->{ft});
-    ($dev->{ft}) = @{$cfg->{dev_adaptors}->{ft}->store($dev->{$dev->{ft}})};
+    ($dev->{ft}) = @{$cfg->{dev_adaptors}->{ft}->store($dev->{ft})};
   }
 
 }
 #-------------------------------------------------------------------------------
-
-=head2
-
-  Name       : 
-  Arg [1]    :
-  Example    :
-  Description:
-  Returntype :
-  Exceptions :
-  Caller     : general
-  Status     : At risk - not tested
-
-=cut
-
-#-------------------------------------------------------------------------------
-sub _migrate_feature_set {
-  my ($cfg, $tr, $dev) = @_;
-  say $tr->{data_set}->name;
-
-  my $dev_ds = $cfg->{dev_adaptors}->{ds}->fetch_by_name($tr->{ds}->name);
-  if(defined $dev_ds){ 
-    _compare_data_set($cfg, $tr->{ds}, $dev->{ds});
-    #avoid $dev->{ds} = undefined
-    $dev->{ds} = $dev_ds;
-  }
-
-  $tr->{fs} = $tr->{ds}->product_FeatureSet;
-  my $dev_fs = $cfg->{dev_adaptors}->{fs}->fetch_by_name($tr->{fs}->name);
-  if(defined $dev_fs){
-    _compare_feature_set($cfg, $tr, $dev);
-    _compare_feature_set_data_set($cfg, $dev_fs, $ds, $tr, $dev);
-  }
-
-  $tr->{rs} = $tr->{ds}->get_supporting_sets;
-  foreach my $tr_rs (@{$tr->{rs}}){
-
-    # $cfg->{dba_tracking}->is_stored_and_valid('Bio::EnsEMBL::Funcgen::ResultSet', $tr_rs);
-
-    my $dev_rs = $cfg->{dev_adaptors}->{rs}->fetch_by_name($tr_rs->name);
-    if(defined $dev_rs){
-      _compare_result_sets($cfg, $tr_rs, $dev_rs, $tr, $dev);
-      _compare_result_set_data_set($cfg, $dev_rs, $dev->{ds}, $tr, $dev);
-      push(@{$dev->{rs}}, $dev_rs);
-    }
-
-    $tr->{input_subsets} = $tr_rs->get_support;
-    foreach my $tr_iss (@{$tr->{input_subsets}}){
-      my $dev_iss = $cfg->{dev_adaptors}->{iss}->fetch_by_name($tr_iss->name);
-      if(defined $dev_iss){
-        _compare_input_subset($tr_iss, $dev_iss, $tr, $dev);
-        _compare_input_subset_data_set($cfg, $dev_iss, $dev->{ds}, $tr, $dev);
-        push(@{$dev->{iss}}, $dev_iss);
-      }
-    }
-
-    $tr->{experiment} = $tr_rs->experiment;
-    my $dev_exp = $cfg->{dev_adaptors}->{ex}->fetch_by_name($tr->{exp}->name);
-    if(defined $dev_exp){
-      _compare_experiment($cfg, $tr, $dev);
-      _compare_experiment_data_set($cfg, $dev_exp, $dev->{ds}, $tr, $dev);
-      $dev->{exp} = $dev_exp;
-    }
-
-    $tr->{experimental_group} = $tr->exp->experimental_group;
-    my $dev_exp_group = $cfg->{dev_adaptors}->{eg}->fetch_by_name($tr->{exp_group}->name);
-    if(defined $dev_exp_group){
-      _compare_experimental_group($cfg, $tr, $dev);
-      $dev->{exp_group} = $dev_exp_group;
-    }
-  }
-}
-#-------------------------------------------------------------------------------
-
 
 
 =head2
@@ -511,9 +519,15 @@ sub _print_object {
   my ($object) = @_;
 
   my %class = (
-    analysis     => 'Bio::EnsEMBL::Analysis',
-    cell_type    => 'Bio::EnsEMBL::Funcgen::CellType',
-    feature_type => 'Bio::EnsEMBL::Funcgen::FeatureType',
+    analysis           => 'Bio::EnsEMBL::Analysis',
+    cell_type          => 'Bio::EnsEMBL::Funcgen::CellType',
+    data_set           => 'Bio::EnsEMBL::Funcgen::DataSet',
+    experiment         => 'Bio::EnsEMBL::Funcgen::Experiment',
+    experimental_group => 'Bio::EnsEMBL::Funcgen::ExperimentalGroup',
+    feature_type       => 'Bio::EnsEMBL::Funcgen::FeatureType',
+    result_set         => 'Bio::EnsEMBL::Funcgen::ResultSet',
+    input_subset       => 'Bio::EnsEMBL::Funcgen::InputSubset',
+
     );
 
   my @attributes = qw(name logic_name dbID);
@@ -537,6 +551,7 @@ sub _print_object {
       }
     }
   }
+  die;
 }
 
 ################################################################################
@@ -557,7 +572,7 @@ sub _print_object {
 #-------------------------------------------------------------------------------
 
 sub _migrate_regulatory_feature {
-  say "Implement";
+  throw "Not implemented yet";
 }
 #-------------------------------------------------------------------------------
 
@@ -620,13 +635,13 @@ sub _add_control_experiment {
 =cut
 
 #-------------------------------------------------------------------------------
-sub store_experimental_group {
+sub _store_experimental_group {
   my ($cfg, $tr, $dev) = @_;
 
-  $dev->{exp_group} = create_storable_clone(
+  $dev->{exp_group} = create_Storable_clone(
     $tr->{exp_group}  
   );
-  $dev->{exp_group} = @{$cfg->{dev_adaptors}->{exp}->store($dev->{exp})};
+  $dev->{exp_group} = @{$cfg->{dev_adaptors}->{eg}->store($dev->{exp_group})};
 }
 #-------------------------------------------------------------------------------
 
@@ -647,12 +662,10 @@ sub store_experimental_group {
 sub _store_experiment {
   my ($cfg, $tr, $dev) = @_;
 
-
   $dev->{exp}   = create_Storable_clone(
     $tr->{exp},
     {-EXPERIMENTAL_GROUP => $dev->{exp_group}});
-
-  ($dev->{exp}) = @{$cfg->{dev_adaptors}->{exp}->store($dev->{exp})};
+  ($dev->{exp}) = @{$cfg->{dev_adaptors}->{ex}->store($dev->{exp})};
 
   my $states = $tr->{exp}->get_all_states;
   _add_states($cfg, $states, $dev->{exp});
@@ -813,16 +826,14 @@ sub _create_storable_analysis {
 
 #-------------------------------------------------------------------------------
 sub _store_in_dev {
-  my ($cfg, $tr, $dev, $fh) = @_;
+  my ($cfg, $tr, $dev) = @_;
 
   if(! defined $dev->{exp_group}){
-    _store_experimental_group()
+    _store_experimental_group($cfg, $tr, $dev);
   }
-
   if(! defined $dev->{exp}){
-   _store_experiment($cfg, $tr, $dev);
+    _store_experiment($cfg, $tr, $dev);
   }
-
   if(! defined $dev->{iss}){
     for my $tr_iss(@{$tr->{iss}}){
       _store_input_subset ($cfg, $tr_iss, $tr, $dev);
@@ -909,7 +920,6 @@ sub _get_dev_states {
         return ($row[0],$row[1]) ;
       }
     );
-    say dump_data($cfg,1,1);
 }
 
 
@@ -1046,9 +1056,11 @@ sub _compare_feature_type {
   $tmp = $tr->{ft}->compare_to($dev->{ft},'-1');
   _check_tmp($tmp, $error);
 
-  $tmp = $tr->{ft}->analysis->compare($dev->{ft}->analysis);
-  _check_tmp($tmp, $error);
-
+  if(defined $tr->{ft}->analysis){
+    $tmp = $tr->{ft}->analysis->compare($dev->{ft}->analysis);
+    _check_tmp($tmp, $error);
+  }
+  
   if(defined ($error) ){
     $error = "--- FeatureType ---\n" . $error;
     print_cached_objects($cfg, $tr, $dev, $error);
@@ -1476,7 +1488,7 @@ sub _compare_experiment {
 #-------------------------------------------------------------------------------
 #experime
 
-sub compare_experimental_group {
+sub _compare_experimental_group {
   my ($cfg, $tr, $dev) = @_;
 
   my $error = undef;
