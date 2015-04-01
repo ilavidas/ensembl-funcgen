@@ -333,10 +333,11 @@ sub _migrate_feature_set {
 
   my $dev_ds = $cfg->{dev_adaptors}->{ds}->fetch_by_name($tr->{ds}->name);
   if(defined $dev_ds){ 
+    $dev->{ds} = $dev_ds;
     _compare_data_set($cfg, $tr->{ds}, $dev->{ds});
     #avoid $dev->{ds} = undefined
-    $dev->{ds} = $dev_ds;
   }
+
 
   $tr->{fs} = $tr->{ds}->product_FeatureSet;
   my $dev_fs = $cfg->{dev_adaptors}->{fs}->fetch_by_name($tr->{fs}->name);
@@ -357,7 +358,7 @@ sub _migrate_feature_set {
       push(@{$dev->{rs}}, $dev_rs);
     }
 
-    $tr->{input_subsets} = $tr_rs->get_support;
+    $tr->{iss} = $tr_rs->get_support;
     foreach my $tr_iss (@{$tr->{iss}}){
       my $dev_iss = $cfg->{dev_adaptors}->{iss}->fetch_by_name($tr_iss->name);
       if(defined $dev_iss){
@@ -372,7 +373,7 @@ sub _migrate_feature_set {
     if(defined $dev_exp){
       $dev->{exp} = $dev_exp;
       _compare_experiment($cfg, $tr, $dev);
-      _compare_experiment_data_set($cfg, $dev_exp, $dev->{ds}, $tr, $dev);
+      _compare_experiment_data_set($cfg, $dev->{exp}, $dev->{ds}, $tr, $dev);
     }
 
     $tr->{exp_group} = $tr->{exp}->experimental_group;
@@ -435,7 +436,6 @@ sub _migrate_cell_feature_type {
     $dev->{ft}   = create_Storable_clone ($tr->{ft});
     ($dev->{ft}) = @{$cfg->{dev_adaptors}->{ft}->store($dev->{ft})};
   }
-
 }
 #-------------------------------------------------------------------------------
 
@@ -662,9 +662,11 @@ sub _store_experimental_group {
 sub _store_experiment {
   my ($cfg, $tr, $dev) = @_;
 
-  $dev->{exp}   = create_Storable_clone(
-    $tr->{exp},
-    {-EXPERIMENTAL_GROUP => $dev->{exp_group}});
+  $dev->{exp}   = create_Storable_clone($tr->{exp},{
+    -cell_type          => $dev->{ct},
+    -experimental_group => $dev->{exp_group},
+    -feature_type       => $dev->{ft},
+    });
   ($dev->{exp}) = @{$cfg->{dev_adaptors}->{ex}->store($dev->{exp})};
 
   my $states = $tr->{exp}->get_all_states;
@@ -829,19 +831,29 @@ sub _store_in_dev {
   my ($cfg, $tr, $dev) = @_;
 
   if(! defined $dev->{exp_group}){
+      _compare_experiment($cfg, $tr, $dev);
+      _compare_experiment_data_set($cfg, $dev->{exp}, $dev->{ds}, $tr, $dev);
+    
+  }
+
+  else {
+    say "Storing: " . $tr->{exp_group}->name;
     _store_experimental_group($cfg, $tr, $dev);
   }
   if(! defined $dev->{exp}){
+    say "Storing: " . $tr->{exp}->name;
     _store_experiment($cfg, $tr, $dev);
   }
   if(! defined $dev->{iss}){
     for my $tr_iss(@{$tr->{iss}}){
+      say "Store ISS " . $tr_iss->name;
       _store_input_subset ($cfg, $tr_iss, $tr, $dev);
     }
   }
 
   if( !defined $dev->{result_sets} && defined $tr->{result_sets} ){
     foreach my $tr_rs (@{$tr->{result_sets}}) {
+      say "Store ResultSet";
       _store_result_set($cfg, $tr_rs, $tr, $dev);
     }
   }
@@ -1352,7 +1364,6 @@ sub _compare_experiment_data_set {
   my ($cfg, $exp, $ds, $tr, $dev) = @_;
 
   my $error = undef;
-
   if($exp->cell_type->dbID != $ds->cell_type->dbID){
     $error .= "CellType missmatch [RS/DS] " . $exp->cell_type->dbID.'|';
     $error .= $ds->cell_type->dbID;
