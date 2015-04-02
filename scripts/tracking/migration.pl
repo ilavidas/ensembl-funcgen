@@ -362,8 +362,7 @@ sub _migrate_feature_set {
     foreach my $tr_iss (@{$tr->{iss}}){
       my $dev_iss = $cfg->{dev_adaptors}->{iss}->fetch_by_name($tr_iss->name);
       if(defined $dev_iss){
-        _compare_input_subset($tr_iss, $dev_iss, $tr, $dev);
-        _compare_input_subset_data_set($cfg, $dev_iss, $dev->{ds}, $tr, $dev);
+        
         push(@{$dev->{iss}}, $dev_iss);
       }
     }
@@ -372,17 +371,14 @@ sub _migrate_feature_set {
     my $dev_exp = $cfg->{dev_adaptors}->{ex}->fetch_by_name($tr->{exp}->name);
     if(defined $dev_exp){
       $dev->{exp} = $dev_exp;
-      _compare_experiment($cfg, $tr, $dev);
-      _compare_experiment_data_set($cfg, $dev->{exp}, $dev->{ds}, $tr, $dev);
     }
 
     $tr->{exp_group} = $tr->{exp}->experimental_group;
     my $eg_name = $tr->{exp_group}->name;
     my $dev_exp_group = $cfg->{dev_adaptors}->{eg}->fetch_by_name($eg_name);
-
     if(defined $dev_exp_group){
       $dev->{exp_group} = $dev_exp_group;
-      _compare_experimental_group($cfg, $tr, $dev);
+      
     }
   }
 }
@@ -456,7 +452,6 @@ sub _migrate_cell_feature_type {
 #-------------------------------------------------------------------------------
 sub print_cached_objects {
   my ($cfg, $tr, $dev, $error) = @_;
-
   say "--- Error --- ";
   say $error;
 
@@ -465,6 +460,7 @@ sub print_cached_objects {
 
   say "\n--- Dev DB: ".$cfg->{dev_db}->{dbname} ."---";
   _iterate($dev);
+  die;
 }
 #-------------------------------------------------------------------------------
 
@@ -551,7 +547,6 @@ sub _print_object {
       }
     }
   }
-  die;
 }
 
 ################################################################################
@@ -638,6 +633,9 @@ sub _add_control_experiment {
 sub _store_experimental_group {
   my ($cfg, $tr, $dev) = @_;
 
+  my $this_function = (caller(0))[3];
+  say $this_function;
+
   $dev->{exp_group} = create_Storable_clone(
     $tr->{exp_group}  
   );
@@ -661,6 +659,8 @@ sub _store_experimental_group {
 #-------------------------------------------------------------------------------
 sub _store_experiment {
   my ($cfg, $tr, $dev) = @_;
+my $this_function = (caller(0))[3];
+say $this_function;
 
   $dev->{exp}   = create_Storable_clone($tr->{exp},{
     -cell_type          => $dev->{ct},
@@ -692,10 +692,22 @@ sub _store_experiment {
 sub _store_input_subset {
   my ($cfg, $tr_iss, $tr, $dev) = @_;
 
-  my $analysis = _store_analysis($cfg, $tr_iss->analysis);
+my $this_function = (caller(0))[3];
+say $this_function;
 
+  my $tr_anal = $tr_iss->analysis; 
+  my $name = $tr_anal->logic_name;
+  my $dev_anal = $cfg->{dev_adaptors}->{an}->fetch_by_logic_name($name);
+
+  if(defined $dev_anal){
+    _compare_analysis($cfg, $tr_anal, $dev_anal, $tr, $dev);
+  }
+  else{
+    $dev_anal = _store_analysis($cfg, $tr_iss->analysis);
+  }
+  
   my $dev_iss  = create_Storable_clone($tr_iss, {
-      -analysis     => $analysis,
+      -analysis     => $dev_anal,
       -cell_type    => $dev->{ct},
       -experiment   => $dev->{exp},
       -feature_type => $dev->{ft},
@@ -734,7 +746,7 @@ sub _store_result_set {
       -analysis     => $analysis,
       -cell_type    => $dev->{ct},
       -feature_type => $dev->{ft},
-      -support      => $dev->{input_sets},
+      -support      => $dev->{iss},
       });
   
   ($dev_rs) = @{$cfg->{dev_adaptors}->{rs}->store($dev_rs)};
@@ -761,27 +773,39 @@ sub _store_result_set {
 
 #-------------------------------------------------------------------------------
 sub _store_data_set {
-  my ($cfg, $tr, $dev);
+  my ($cfg, $tr, $dev) = @_;
+
   $dev->{ds} = create_Storable_clone($tr->{ds},{
-        -feature_set      => $dev->{feature_set},
-        -supporting_sets  => $dev->{input_sets},
+        -feature_set      => $dev->{fs},
+        -supporting_sets  => $dev->{iss},
         });
-    ($dev->{data_set}) =  @{$cfg->{dev_adaptors}->{data_set}->store($dev->{data_set})};
+    ($dev->{ds}) =  @{$cfg->{dev_adaptors}->{ds}->store($dev->{ds})};
 
 }
 
+=head2
 
+  Name       : _store_analysis
+  Arg [1]    :
+  Example    :
+  Description:
+  Returntype :
+  Exceptions :
+  Caller     : general
+  Status     : At risk - not tested
 
+=cut
+
+#-------------------------------------------------------------------------------
 sub _store_analysis {
   my ($cfg, $tr_anal ) = @_;
 
-  my $logic_name   = $tr_anal->logic_name;
-  my $dev_anal = $cfg->{dev_adaptors}->{an}->fetch_by_logic_name($logic_name);
-
-  if(!defined $tr_anal){
+    my $dev_anal;
     $dev_anal = _create_storable_analysis($cfg, $tr_anal);
-  ($dev_anal) = @{$cfg->{dev_adaptors}->{an}->store($dev_anal)};
-  }
+      say dump_data($dev_anal,1,1);die;
+    my $id    = $cfg->{dev_adaptors}->{an}->store($dev_anal);
+    $dev_anal = $cfg->{dev_adaptors}->{an}->fetch_by_dbID($id);
+
   return $dev_anal;
 }
 
@@ -830,37 +854,61 @@ sub _create_storable_analysis {
 sub _store_in_dev {
   my ($cfg, $tr, $dev) = @_;
 
-  if(! defined $dev->{exp_group}){
-      _compare_experiment($cfg, $tr, $dev);
-      _compare_experiment_data_set($cfg, $dev->{exp}, $dev->{ds}, $tr, $dev);
-    
-  }
+my $this_function = (caller(0))[3];
+say $this_function;
 
+  if(defined $dev->{exp_group}){
+    _compare_experimental_group($cfg, $tr, $dev);
+  }
   else {
-    say "Storing: " . $tr->{exp_group}->name;
     _store_experimental_group($cfg, $tr, $dev);
   }
-  if(! defined $dev->{exp}){
-    say "Storing: " . $tr->{exp}->name;
+
+  if(defined $dev->{exp}){
+    _compare_experiment($cfg, $tr, $dev);
+    _compare_experiment_data_set($cfg, $dev->{exp}, $tr->{ds}, $tr, $dev);
+  }
+  else {
+
     _store_experiment($cfg, $tr, $dev);
   }
-  if(! defined $dev->{iss}){
+
+  if(defined $dev->{iss}){
+    for my $dev_iss(@{$dev->{iss}}){
+      for my $tr_iss(@{$tr->{iss}}){
+        if($dev_iss->name eq $tr_iss->name){
+          _compare_input_subset($tr_iss, $dev_iss, $tr, $dev);
+          _compare_input_subset_data_set($cfg, $dev_iss, $tr->{ds}, $tr, $dev);
+        }
+      }
+    }
+  }
+  else{
     for my $tr_iss(@{$tr->{iss}}){
-      say "Store ISS " . $tr_iss->name;
       _store_input_subset ($cfg, $tr_iss, $tr, $dev);
     }
   }
 
-  if( !defined $dev->{result_sets} && defined $tr->{result_sets} ){
-    foreach my $tr_rs (@{$tr->{result_sets}}) {
-      say "Store ResultSet";
+  if(defined $dev->{rs}){
+    for my $dev_rs(@{$dev->{rs}}){
+      for my $tr_rs(@{$tr->{rs}}){
+        _compare_result_set($cfg, $tr_rs, $dev_rs, $tr, $dev);
+        _compare_result_set_data_set($cfg, $dev_rs, $tr->{ds}, $tr, $dev);
+      }
+    }
+  }
+  else {
+    foreach my $tr_rs (@{$tr->{rs}}) {
       _store_result_set($cfg, $tr_rs, $tr, $dev);
     }
   }
 
-  if(! defined $dev->{data_set}){
-      
-    }
+  if(defined $dev->{data_set}){
+    _compare_data_set($cfg, $tr, $dev);
+  }
+  else{
+    _store_data_set($cfg, $tr, $dev);
+  }
   #*    From flatfile/direct SQL, see confluence
   #    my $AR_annotated_features =
   #      $cfg->{tr_adaptors}->{af}->fetch_all_by_FeatureSets([$tr_fset]);
@@ -1003,6 +1051,39 @@ sub _migrate_annotated_feature {
       \"
 ";
 }
+#-------------------------------------------------------------------------------
+
+################################################################################
+#                            _compare_analysis
+################################################################################
+
+=head2
+
+  Name       : _compare_analysis
+  Arg [1]    :
+  Example    :
+  Description:
+  Returntype :
+  Exceptions :
+  Caller     : general
+  Status     : At risk - not tested
+
+=cut
+
+#-------------------------------------------------------------------------------
+sub _compare_analysis {
+  my ($cfg, $tr_anal, $dev_anal, $tr, $dev) = @_;
+  
+  my $error = undef;
+  my $tmp   = undef;
+  
+  $tmp = $tr_anal->compare($dev_anal);
+  if($tmp != 0){
+    $error .= "Analysis differences\n";
+    print_cached_objects($cfg, $tr, $dev, $error);
+  }
+}
+#-------------------------------------------------------------------------------
 
 
 #-------------------------------------------------------------------------------
@@ -1239,14 +1320,14 @@ sub _compare_result_set_data_set {
 
   my $error = undef;
 
-  if($rs->cell_type->dbID != $ds->cell_type->dbID){
-    $error .= "CellType missmatch [RS/DS] " . $rs->cell_type->dbID.'|';
-    $error .= $ds->cell_type->dbID;
+  if($rs->cell_type->name ne $ds->cell_type->name){
+    $error .= "CellType missmatch [RS/DS] " . $rs->cell_type->name.'|';
+    $error .= $ds->cell_type->name;
   }
 
-  if($rs->feature_type->dbID != $ds->feature_type->dbID){
-    $error .= "FeatureType missmatch [RS/DS] " . $rs->feature_type->dbID.'|';
-    $error .= $ds->feature_type->dbID ."\n";
+  if($rs->feature_type->name ne $ds->feature_type->name){
+    $error .= "FeatureType missmatch [RS/DS] " . $rs->feature_type->name.'|';
+    $error .= $ds->feature_type->name ."\n";
   }
 
   if(defined ($error) ){
@@ -1280,19 +1361,19 @@ sub _compare_feature_set_data_set {
 
   my $error = undef;
 
-  if($fs->cell_type->dbID != $ds->cell_type->dbID){
-    $error .= "CellType missmatch [FS/DS] " . $fs->cell_type->dbID.'|';
-    $error .= $ds->cell_type->dbID;
+  if($fs->cell_type->name ne $ds->cell_type->name){
+    $error .= "CellType missmatch [FS/DS] " . $fs->cell_type->name.'|';
+    $error .= $ds->cell_type->name;
   }
 
-  if($fs->feature_type->dbID != $ds->feature_type->dbID){
-    $error .= "FeatureType missmatch [FS/DS] " . $fs->feature_type->dbID.'|';
-    $error .= $ds->feature_type->dbID ."\n";
+  if($fs->feature_type->name ne $ds->feature_type->name){
+    $error .= "FeatureType missmatch [FS/DS] " . $fs->feature_type->name.'|';
+    $error .= $ds->feature_type->name ."\n";
   }
 
-  if($fs->experiment->dbID != $ds->experiment->dbID){
-    $error .= "Experiment missmatch [FS/DS] " . $fs->cell_type->dbID.'|';
-    $error .= $ds->cell_type->dbID;
+  if($fs->experiment->name ne $ds->experiment->name){
+    $error .= "Experiment missmatch [FS/DS] " . $fs->cell_type->name.'|';
+    $error .= $ds->cell_type->name;
   }
 
   if(defined ($error) ){
@@ -1325,14 +1406,14 @@ sub _compare_input_subset_data_set {
 
   my $error = undef;
 
-  if($iss->cell_type->dbID != $ds->cell_type->dbID){
-    $error .= "CellType missmatch [ISS/DS] " . $iss->cell_type->dbID.'|';
-    $error .= $ds->cell_type->dbID;
+  if($iss->cell_type->name ne $ds->cell_type->name){
+    $error .= "CellType missmatch [ISS/DS] " . $iss->cell_type->name.'|';
+    $error .= $ds->cell_type->name;
   }
 
-  if($iss->feature_type->dbID != $ds->feature_type->dbID){
-    $error .= "FeatureType missmatch [RS/DS] " . $iss->feature_type->dbID.'|';
-    $error .= $ds->feature_type->dbID ."\n";
+  if($iss->feature_type->name ne $ds->feature_type->name){
+    $error .= "FeatureType missmatch [RS/DS] " . $iss->feature_type->name.'|';
+    $error .= $ds->feature_type->name ."\n";
   }
 
   if(defined ($error) ){
@@ -1364,14 +1445,14 @@ sub _compare_experiment_data_set {
   my ($cfg, $exp, $ds, $tr, $dev) = @_;
 
   my $error = undef;
-  if($exp->cell_type->dbID != $ds->cell_type->dbID){
-    $error .= "CellType missmatch [RS/DS] " . $exp->cell_type->dbID.'|';
-    $error .= $ds->cell_type->dbID;
+  if($exp->cell_type->name ne $ds->cell_type->name){
+    $error .= "CellType missmatch [RS/DS] " . $exp->cell_type->name.'|';
+    $error .= $ds->cell_type->name;
   }
 
-  if($exp->feature_type->dbID != $ds->feature_type->dbID){
-    $error .= "FeatureType missmatch [RS/DS] " . $exp->feature_type->dbID.'|';
-    $error .= $ds->feature_type->dbID ."\n";
+  if($exp->feature_type->name ne $ds->feature_type->name){
+    $error .= "FeatureType missmatch [RS/DS] " . $exp->feature_type->name.'|';
+    $error .= $ds->feature_type->name ."\n";
   }
 
   if(defined ($error) ){
