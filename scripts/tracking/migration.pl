@@ -51,7 +51,10 @@ sub main {
 
 }
 
-
+sub print_method {
+ my $parent_function = (caller(1))[3];
+ say $parent_function; 
+}
 
 sub _unlock_meta_table {
   my	($cfg, $dbh_name)	= @_;
@@ -130,6 +133,7 @@ sub _lock_meta_table {
 #-------------------------------------------------------------------------------
 sub _get_cmd_line_options {
   my ($cfg) = @_;
+  
 
   GetOptions(
       $cfg->{user_options} ||= {},
@@ -330,8 +334,10 @@ sub _migrate {
 #-------------------------------------------------------------------------------
 sub _migrate_feature_set {
   my ($cfg, $tr, $dev) = @_;
+  print_method();
 
   my $dev_ds = $cfg->{dev_adaptors}->{ds}->fetch_by_name($tr->{ds}->name);
+
   if(defined $dev_ds){ 
     $dev->{ds} = $dev_ds;
     _compare_data_set($cfg, $tr->{ds}, $dev->{ds});
@@ -343,18 +349,16 @@ sub _migrate_feature_set {
   my $dev_fs = $cfg->{dev_adaptors}->{fs}->fetch_by_name($tr->{fs}->name);
   if(defined $dev_fs){
     _compare_feature_set($cfg, $tr, $dev);
-    _compare_feature_set_data_set($cfg, $dev_fs, $dev->{ds}, $tr, $dev);
+    _compare_feature_set_data_set($cfg, $dev_fs, $tr->{ds}, $tr, $dev);
   }
 
   $tr->{rs} = $tr->{ds}->get_supporting_sets;
   foreach my $tr_rs (@{$tr->{rs}}){
-
     # $cfg->{dba_tracking}->is_stored_and_valid('Bio::EnsEMBL::Funcgen::ResultSet', $tr_rs);
-
     my $dev_rs = $cfg->{dev_adaptors}->{rs}->fetch_by_name($tr_rs->name);
     if(defined $dev_rs){
-      _compare_result_sets($cfg, $tr_rs, $dev_rs, $tr, $dev);
-      _compare_result_set_data_set($cfg, $dev_rs, $dev->{ds}, $tr, $dev);
+      _compare_result_set($cfg, $tr_rs, $dev_rs, $tr, $dev);
+      _compare_result_set_data_set($cfg, $dev_rs, $tr->{ds}, $tr, $dev);
       push(@{$dev->{rs}}, $dev_rs);
     }
 
@@ -404,6 +408,7 @@ sub _migrate_feature_set {
 #-------------------------------------------------------------------------------
 sub _migrate_cell_feature_type {
   my ($cfg, $tr, $dev) = @_;
+  print_method();
 
   $tr->{ct} = $tr->{ds}->cell_type;
   $tr->{ft} = $tr->{ds}->feature_type;
@@ -452,8 +457,11 @@ sub _migrate_cell_feature_type {
 #-------------------------------------------------------------------------------
 sub print_cached_objects {
   my ($cfg, $tr, $dev, $error) = @_;
-  say "--- Error --- ";
-  say $error;
+  
+  my $parent  = (caller(1))[3];
+  my $gparent = (caller(2))[3];
+  say "--- Error Caller: $gparent / $parent ---" ;
+
 
   say "\n--- Tracking DB: ".$cfg->{efg_db}->{dbname} ."---";
   _iterate($tr);
@@ -542,7 +550,12 @@ sub _print_object {
       say "\t" . $method;
       for my $attr (@attributes){
         if( $type->can($attr) ) {
-          say "\t\t$attr: ".$object->$method->$attr;
+          if(defined $object->$method){
+            say "\t\t$attr: ".$object->$method->$attr;
+          }
+          else {
+            say "\t\t$attr: Undefinded, ' $method ' for this object likely optional";
+          }
         }
       }
     }
@@ -592,6 +605,8 @@ sub _migrate_regulatory_feature {
 sub _add_control_experiment {
   my ($cfg, $diffs) = @_;
 
+die "Needs reimplementing";
+
   if(exists $cfg->{add_control_exp}){
     for my $tr_exp (@{$cfg->{add_control_exp}}){
       my $name = $tr_exp->name;
@@ -633,13 +648,14 @@ sub _add_control_experiment {
 sub _store_experimental_group {
   my ($cfg, $tr, $dev) = @_;
 
-  my $this_function = (caller(0))[3];
-  say $this_function;
+  print_method();
 
   $dev->{exp_group} = create_Storable_clone(
     $tr->{exp_group}  
   );
+  say ref($tr->{exp_group});
   $dev->{exp_group} = @{$cfg->{dev_adaptors}->{eg}->store($dev->{exp_group})};
+  say 'expg: ' . ref($dev->{exp_group});
 }
 #-------------------------------------------------------------------------------
 
@@ -659,8 +675,8 @@ sub _store_experimental_group {
 #-------------------------------------------------------------------------------
 sub _store_experiment {
   my ($cfg, $tr, $dev) = @_;
-my $this_function = (caller(0))[3];
-say $this_function;
+
+  print_method();
 
   $dev->{exp}   = create_Storable_clone($tr->{exp},{
     -cell_type          => $dev->{ct},
@@ -692,19 +708,9 @@ say $this_function;
 sub _store_input_subset {
   my ($cfg, $tr_iss, $tr, $dev) = @_;
 
-my $this_function = (caller(0))[3];
-say $this_function;
+  print_method();
 
-  my $tr_anal = $tr_iss->analysis; 
-  my $name = $tr_anal->logic_name;
-  my $dev_anal = $cfg->{dev_adaptors}->{an}->fetch_by_logic_name($name);
-
-  if(defined $dev_anal){
-    _compare_analysis($cfg, $tr_anal, $dev_anal, $tr, $dev);
-  }
-  else{
-    $dev_anal = _store_analysis($cfg, $tr_iss->analysis);
-  }
+  my $dev_anal = _get_or_store_analysis($cfg, $tr_iss->analysis, $tr, $dev);
   
   my $dev_iss  = create_Storable_clone($tr_iss, {
       -analysis     => $dev_anal,
@@ -740,27 +746,70 @@ say $this_function;
 sub _store_result_set {
   my ($cfg, $tr_rs, $tr, $dev) = @_;
 
-  my $analysis = _store_analysis($cfg, $tr_rs->analysis);
+  print_method();
+
+  my $dev_anal = _get_or_store_analysis($cfg, $tr_rs->analysis, $tr, $dev);
+
+  # say dump_data($tr_rs,1,1);
+  # say dump_data($dev->{iss},1,1);
 
   my $dev_rs  = create_Storable_clone($tr_rs, {
-      -analysis     => $analysis,
+      -analysis     => $dev_anal,
       -cell_type    => $dev->{ct},
+      -experiment   => $dev->{exp},
       -feature_type => $dev->{ft},
       -support      => $dev->{iss},
       });
-  
-  ($dev_rs) = @{$cfg->{dev_adaptors}->{rs}->store($dev_rs)};
+
+my @rs;
+push(@rs,$dev_rs);
+  ($dev_rs) = @{$cfg->{dev_adaptors}->{rs}->store(@rs)};
+  say "After store";
 
   my $states = $tr_rs->get_all_states;
+
   _add_states($cfg, $states, $dev_rs);
-  $cfg->{dev_adaptors}->{iss}->store_states($dev_rs);
+  $cfg->{dev_adaptors}->{rs}->store_states($dev_rs);
 
   push(@{$dev->{rs}}, $dev_rs);
 }
 
 =head2
 
-  Name       : 
+  Name       : _store_feature_set
+  Arg [1]    :
+  Example    :
+  Description:
+  Returntype :
+  Exceptions :
+  Caller     : general
+  Status     : At risk - not tested
+
+=cut
+
+#-------------------------------------------------------------------------------
+sub _store_feature_set {
+  my ($cfg, $tr, $dev) = @_;
+
+  print_method();
+
+  my $dev_anal = _get_or_store_analysis($cfg, $tr->{fs}->analysis, $tr, $dev);
+say "Finished anal";
+  $dev->{fs} = create_Storable_clone($tr->{fs},{
+        -analysis     => $dev_anal,
+        -cell_type => $dev->{ct},
+        -experiment   => $dev->{exp},
+        -feature_type => $dev->{ft},
+        });
+    ($dev->{fs}) =  @{$cfg->{dev_adaptors}->{fs}->store($dev->{fs})};
+say "stored";
+}
+#-------------------------------------------------------------------------------
+
+
+=head2
+
+  Name       : _store_data_set
   Arg [1]    :
   Example    :
   Description:
@@ -775,17 +824,20 @@ sub _store_result_set {
 sub _store_data_set {
   my ($cfg, $tr, $dev) = @_;
 
+  print_method();
+
   $dev->{ds} = create_Storable_clone($tr->{ds},{
         -feature_set      => $dev->{fs},
         -supporting_sets  => $dev->{iss},
         });
     ($dev->{ds}) =  @{$cfg->{dev_adaptors}->{ds}->store($dev->{ds})};
-
+say "stored";
 }
+#-------------------------------------------------------------------------------
 
 =head2
 
-  Name       : _store_analysis
+  Name       : _get_or_store_analysis
   Arg [1]    :
   Example    :
   Description:
@@ -797,14 +849,22 @@ sub _store_data_set {
 =cut
 
 #-------------------------------------------------------------------------------
-sub _store_analysis {
-  my ($cfg, $tr_anal ) = @_;
+sub _get_or_store_analysis {
+  my ($cfg, $tr_anal, $tr, $dev) = @_;
 
-    my $dev_anal;
+  print_method();
+
+  my $name      = $tr_anal->logic_name;
+  my $dev_anal  = $cfg->{dev_adaptors}->{an}->fetch_by_logic_name($name);
+
+  if(defined $dev_anal){
+    _compare_analysis($cfg, $tr_anal, $dev_anal, $tr, $dev);
+  }
+  else {
     $dev_anal = _create_storable_analysis($cfg, $tr_anal);
-      say dump_data($dev_anal,1,1);die;
     my $id    = $cfg->{dev_adaptors}->{an}->store($dev_anal);
     $dev_anal = $cfg->{dev_adaptors}->{an}->fetch_by_dbID($id);
+  }
 
   return $dev_anal;
 }
@@ -827,6 +887,8 @@ sub _store_analysis {
 #-------------------------------------------------------------------------------
 sub _create_storable_analysis {
   my ($cfg, $analysis) = @_;
+
+  print_method();
 
   my $dev_analysis;
   $dev_analysis = bless({%{$analysis}}, ref($analysis));
@@ -854,8 +916,7 @@ sub _create_storable_analysis {
 sub _store_in_dev {
   my ($cfg, $tr, $dev) = @_;
 
-my $this_function = (caller(0))[3];
-say $this_function;
+  print_method();
 
   if(defined $dev->{exp_group}){
     _compare_experimental_group($cfg, $tr, $dev);
@@ -869,41 +930,53 @@ say $this_function;
     _compare_experiment_data_set($cfg, $dev->{exp}, $tr->{ds}, $tr, $dev);
   }
   else {
-
     _store_experiment($cfg, $tr, $dev);
   }
 
-  if(defined $dev->{iss}){
-    for my $dev_iss(@{$dev->{iss}}){
-      for my $tr_iss(@{$tr->{iss}}){
+  for my $tr_iss(@{$tr->{iss}}){
+    my $found = 0;
+    if (defined $dev->{iss}){
+      for my $dev_iss(@{$dev->{iss}}){
         if($dev_iss->name eq $tr_iss->name){
-          _compare_input_subset($tr_iss, $dev_iss, $tr, $dev);
+          _compare_input_subset($cfg, $tr_iss, $dev_iss, $tr, $dev);
           _compare_input_subset_data_set($cfg, $dev_iss, $tr->{ds}, $tr, $dev);
+          $found = 1;
         }
       }
     }
-  }
-  else{
-    for my $tr_iss(@{$tr->{iss}}){
+    if($found == 0){
       _store_input_subset ($cfg, $tr_iss, $tr, $dev);
     }
   }
-
-  if(defined $dev->{rs}){
-    for my $dev_rs(@{$dev->{rs}}){
-      for my $tr_rs(@{$tr->{rs}}){
-        _compare_result_set($cfg, $tr_rs, $dev_rs, $tr, $dev);
-        _compare_result_set_data_set($cfg, $dev_rs, $tr->{ds}, $tr, $dev);
+  for my $tr_rs(@{$tr->{rs}}){
+    
+    my $found = 0;
+    if(defined $dev->{rs}){
+      say 'Defined';
+      for my $dev_rs(@{$dev->{rs}}){
+        if($dev_rs->name eq $tr_rs->name){
+          say 'In compare';
+          say $dev_rs->name;
+          _compare_result_set($cfg, $tr_rs, $dev_rs, $tr, $dev);
+          _compare_result_set_data_set($cfg, $dev_rs, $tr->{ds}, $tr, $dev);
+          $found = 1;
+        }
       }
     }
-  }
-  else {
-    foreach my $tr_rs (@{$tr->{rs}}) {
+    if($found == 0){
       _store_result_set($cfg, $tr_rs, $tr, $dev);
     }
   }
+die;
 
-  if(defined $dev->{data_set}){
+  if(defined $dev->{fs}){
+    _compare_feature_set($cfg, $tr, $dev);
+  }
+  else{
+    _store_feature_set($cfg, $tr, $dev);
+  }
+
+  if(defined $dev->{ds}){
     _compare_data_set($cfg, $tr, $dev);
   }
   else{
@@ -930,6 +1003,7 @@ say $this_function;
 #-------------------------------------------------------------------------------
 sub _add_states {
   my ($cfg, $cached_states, $object) = @_;
+  print_method();
 
   if(! $object->can('add_status')){
     throw("Can't add status " . $object->name. ' Type: '. ref($object));
@@ -958,6 +1032,7 @@ sub _add_states {
 #-------------------------------------------------------------------------------
 sub _get_dev_states {
   my ($cfg) = @_;
+  print_method();
 
   my $helper =
        Bio::EnsEMBL::Utils::SqlHelper->new( 
@@ -1073,13 +1148,14 @@ sub _migrate_annotated_feature {
 #-------------------------------------------------------------------------------
 sub _compare_analysis {
   my ($cfg, $tr_anal, $dev_anal, $tr, $dev) = @_;
+  print_method();
   
   my $error = undef;
   my $tmp   = undef;
-  
+
   $tmp = $tr_anal->compare($dev_anal);
   if($tmp != 0){
-    $error .= "Analysis differences\n";
+    $error .= "Analysis differences $tmp\n";
     print_cached_objects($cfg, $tr, $dev, $error);
   }
 }
@@ -1108,6 +1184,7 @@ sub _compare_analysis {
 #-------------------------------------------------------------------------------
 sub _compare_cell_type {
   my ($cfg, $tr, $dev) = @_;
+  print_method();
   
   my $error = undef;
   my $tmp   = undef;
@@ -1123,12 +1200,12 @@ sub _compare_cell_type {
 #-------------------------------------------------------------------------------
 
 ################################################################################
-#                           _Compare_Feature_Type
+#                           _compare_Feature_Type 
 ################################################################################
 
 =head2
 
-  Name       :
+  Name       : _compare_Feature_Type
   Arg [1]    :
   Example    :
   Description:
@@ -1143,6 +1220,7 @@ sub _compare_cell_type {
 sub _compare_feature_type {
   my ($cfg, $tr, $dev) = @_;
   
+  print_method();
   my $error = undef;
   my $tmp   = undef;
 
@@ -1183,6 +1261,7 @@ sub _compare_feature_type {
 #-------------------------------------------------------------------------------
 sub _compare_data_set {
   my ($cfg, $tr, $dev) = @_;
+  print_method();
   
   my $error = undef;
   my $tmp   = undef;
@@ -1222,6 +1301,7 @@ sub _compare_data_set {
 #-------------------------------------------------------------------------------
 sub _compare_feature_set {
   my ($cfg, $tr, $dev) = @_;
+  print_method();
   
   my $error = undef;
   my $tmp   = undef;
@@ -1264,6 +1344,7 @@ sub _compare_feature_set {
 #-------------------------------------------------------------------------------
 sub _compare_result_set {
   my ($cfg, $tr_rs, $dev_rs, $tr, $dev) = @_;
+  print_method();
 
   my $error = undef;
   my $tmp   = undef;
@@ -1317,6 +1398,7 @@ sub _compare_result_set {
 #-------------------------------------------------------------------------------
 sub _compare_result_set_data_set {
   my ($cfg, $rs, $ds, $tr, $dev) = @_;
+  print_method();
 
   my $error = undef;
 
@@ -1358,6 +1440,7 @@ sub _compare_result_set_data_set {
 
 sub _compare_feature_set_data_set {
   my ($cfg, $fs, $ds, $tr, $dev) = @_;
+  print_method();
 
   my $error = undef;
 
@@ -1403,6 +1486,7 @@ sub _compare_feature_set_data_set {
 #-------------------------------------------------------------------------------
 sub _compare_input_subset_data_set {
   my ($cfg, $iss, $ds, $tr, $dev) = @_;
+  print_method();
 
   my $error = undef;
 
@@ -1417,7 +1501,7 @@ sub _compare_input_subset_data_set {
   }
 
   if(defined ($error) ){
-
+    $error = "--- _compare_input_subset_data_set ---\n" . $error;
     print_cached_objects($cfg, $tr, $dev, $error);
   }
 
@@ -1443,6 +1527,7 @@ sub _compare_input_subset_data_set {
 #-------------------------------------------------------------------------------
 sub _compare_experiment_data_set {
   my ($cfg, $exp, $ds, $tr, $dev) = @_;
+  print_method();
 
   my $error = undef;
   if($exp->cell_type->name ne $ds->cell_type->name){
@@ -1456,6 +1541,7 @@ sub _compare_experiment_data_set {
   }
 
   if(defined ($error) ){
+    $error = "--- _compare_experiment_data_set ---\n" . $error;
     print_cached_objects($cfg, $tr, $dev, $error);
   }
 }
@@ -1485,11 +1571,12 @@ sub _compare_experiment_data_set {
 
 #-------------------------------------------------------------------------------
 sub _compare_input_subset {
-  my ($cfg,$ tr_iss, $dev_iss, $tr, $dev) = @_;
+  my ($cfg, $tr_iss, $dev_iss, $tr, $dev) = @_;
+  print_method();
 
   my $error = undef;
   my $tmp   = undef;
-  
+
   $tmp = $tr_iss->compare_to($dev_iss,'-1');
   _check_tmp($tmp, $error);
 
@@ -1537,6 +1624,7 @@ sub _compare_input_subset {
 
 sub _compare_experiment {
   my ($cfg, $tr, $dev) = @_;
+  print_method();
 
   my $error = undef;
   my $tmp   = undef;
@@ -1582,6 +1670,7 @@ sub _compare_experiment {
 
 sub _compare_experimental_group {
   my ($cfg, $tr, $dev) = @_;
+  print_method();
 
   my $error = undef;
   my $tmp   = undef;
