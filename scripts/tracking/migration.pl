@@ -291,11 +291,12 @@ sub _get_current_data_sets {
 sub _migrate {
   my ($cfg) = @_;
 
-  my ($tr, $dev) = ({},{});
+
   my $flag_rf = $cfg->{generic}->{regulatory_feature};
   
   DATASET:
   for my $tr_ds(@{$cfg->{release}->{data_set}}) {
+    my ($tr, $dev) = ({},{});
     next if($tr_ds->feature_type eq 'RegulatoryFeature' && $flag_rf == 0);
 
 
@@ -313,10 +314,6 @@ sub _migrate {
   return ;
 }## --- end sub _migrate
 #-------------------------------------------------------------------------------
-
-
-
-
 
 =head2
 
@@ -354,7 +351,6 @@ sub _migrate_feature_set {
 
   $tr->{rs} = $tr->{ds}->get_supporting_sets;
   foreach my $tr_rs (@{$tr->{rs}}){
-    # $cfg->{dba_tracking}->is_stored_and_valid('Bio::EnsEMBL::Funcgen::ResultSet', $tr_rs);
     my $dev_rs = $cfg->{dev_adaptors}->{rs}->fetch_by_name($tr_rs->name);
     if(defined $dev_rs){
       _compare_result_set($cfg, $tr_rs, $dev_rs, $tr, $dev);
@@ -363,10 +359,17 @@ sub _migrate_feature_set {
     }
 
     $tr->{iss} = $tr_rs->get_support;
+    delete $dev->{iss};
+
     foreach my $tr_iss (@{$tr->{iss}}){
       my $dev_iss = $cfg->{dev_adaptors}->{iss}->fetch_by_name($tr_iss->name);
       if(defined $dev_iss){
-        
+        say "trNamr: " .$tr_iss->name;
+        say "Dev name: " . $dev_iss->name;
+        say "tr FT: " . $tr_iss->feature_type->name;
+        say "dv FT: " . $dev_iss->feature_type->name;
+        _compare_input_subset($cfg, $tr_iss, $dev_iss, $tr, $dev);
+        _compare_input_subset_data_set($cfg, $dev_iss, $tr->{ds}, $tr, $dev);
         push(@{$dev->{iss}}, $dev_iss);
       }
     }
@@ -421,7 +424,7 @@ sub _migrate_cell_feature_type {
     $dev->{ct} = $dev_ct;
     _compare_cell_type($cfg, $tr, $dev);
   }
-  else{
+  else {
     $dev->{ct}   = create_Storable_clone ($tr->{ct});
     ($dev->{ct}) = @{$cfg->{dev_adaptors}->{ct}->store($dev->{ct})};
   }
@@ -460,14 +463,16 @@ sub print_cached_objects {
   
   my $parent  = (caller(1))[3];
   my $gparent = (caller(2))[3];
-  say "--- Error Caller: $gparent / $parent ---" ;
-
 
   say "\n--- Tracking DB: ".$cfg->{efg_db}->{dbname} ."---";
   _iterate($tr);
 
-  say "\n--- Dev DB: ".$cfg->{dev_db}->{dbname} ."---";
+  say "\n--- Dev DB: ".$cfg->{dev_db}->{dbname} ."---\n";
   _iterate($dev);
+ 
+  say "x" x 90   ."\n--- Error Caller: $gparent / $parent ---\n" ;
+ 
+  say "Error message: $error"; 
   die;
 }
 #-------------------------------------------------------------------------------
@@ -761,7 +766,7 @@ sub _store_result_set {
       -support      => $dev->{iss},
       });
 
-  ($dev_rs) = @{$cfg->{dev_adaptors}->{rs}->store([$dev_rs])};
+  ($dev_rs) = @{$cfg->{dev_adaptors}->{rs}->store($dev_rs)};
 
   my $states = $tr_rs->get_all_states;
 
@@ -791,15 +796,14 @@ sub _store_feature_set {
   print_method();
 
   my $dev_anal = _get_or_store_analysis($cfg, $tr->{fs}->analysis, $tr, $dev);
-say "Finished anal";
+
   $dev->{fs} = create_Storable_clone($tr->{fs},{
         -analysis     => $dev_anal,
-        -cell_type => $dev->{ct},
+        -cell_type    => $dev->{ct},
         -experiment   => $dev->{exp},
         -feature_type => $dev->{ft},
         });
     ($dev->{fs}) =  @{$cfg->{dev_adaptors}->{fs}->store($dev->{fs})};
-say "stored";
 }
 #-------------------------------------------------------------------------------
 
@@ -964,7 +968,6 @@ sub _store_in_dev {
       _store_result_set($cfg, $tr_rs, $tr, $dev);
     }
   }
-die;
 
   if(defined $dev->{fs}){
     _compare_feature_set($cfg, $tr, $dev);
@@ -1472,7 +1475,7 @@ sub _compare_feature_set_data_set {
   Name       : _compare_result_input_subset_data_set
   Arg [1]    :
   Example    :
-  Description:
+  Description: Compare 
   Returntype :
   Exceptions :
   Caller     : general
@@ -1491,14 +1494,17 @@ sub _compare_input_subset_data_set {
     $error .= "CellType missmatch [ISS/DS] " . $iss->cell_type->name.'|';
     $error .= $ds->cell_type->name;
   }
-
-  if($iss->feature_type->name ne $ds->feature_type->name){
-    $error .= "FeatureType missmatch [RS/DS] " . $iss->feature_type->name.'|';
-    $error .= $ds->feature_type->name ."\n";
+  if($iss->feature_type->name ne 'WCE'){
+    if($iss->feature_type->name ne $ds->feature_type->name){
+      $error .= "FeatureType missmatch [ISS/DS] ".$iss->feature_type->name.'|';
+      $error .= $ds->feature_type->name ."\n";
+    }
   }
-
   if(defined ($error) ){
     $error = "--- _compare_input_subset_data_set ---\n" . $error;
+      say dump_data($iss,1,1);
+
+    push(@{$dev->{iss}}, $iss);
     print_cached_objects($cfg, $tr, $dev, $error);
   }
 
