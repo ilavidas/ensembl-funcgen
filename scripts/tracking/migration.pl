@@ -761,10 +761,7 @@ sub _store_result_set {
       -support      => $dev->{iss},
       });
 
-my @rs;
-push(@rs,$dev_rs);
-  ($dev_rs) = @{$cfg->{dev_adaptors}->{rs}->store(@rs)};
-  say "After store";
+  ($dev_rs) = @{$cfg->{dev_adaptors}->{rs}->store([$dev_rs])};
 
   my $states = $tr_rs->get_all_states;
 
