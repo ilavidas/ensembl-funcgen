@@ -74,7 +74,7 @@ CREATE TABLE `regulatory_feature` (
   `seq_region_start` int(10) unsigned NOT NULL,
   `seq_region_end` int(10) unsigned NOT NULL,
   `display_label` varchar(80) default NULL,
-  `stable_id` mediumint(8) unsigned default NULL,
+  `stable_id`  varchar(128) DEFAULT NULL,
   `binary_string` varchar(500) default NULL,
   `projected` boolean default FALSE,
   `bound_start_length` mediumint(3) unsigned NOT NULL,
@@ -274,7 +274,7 @@ CREATE TABLE `mirna_target_feature` (
   KEY `feature_type_idx` (`feature_type_id`),
   KEY `feature_set_idx` (`feature_set_id`),
   KEY `seq_region_idx` (`seq_region_id`,`seq_region_start`)
-) ENGINE=MyISAM DEFAULT CHARSET=latin1;
+) ENGINE=MyISAM DEFAULT CHARSET=latin1 MAX_ROWS=100000000;
 
 
 /**
@@ -1430,6 +1430,8 @@ INSERT INTO meta (species_id, meta_key, meta_value) VALUES (NULL, 'schema_versio
 
 INSERT INTO meta (species_id, meta_key, meta_value) VALUES (NULL, 'patch', 'patch_79_80_a.sql|schema_version');
 INSERT INTO meta (species_id, meta_key, meta_value) VALUES (NULL, 'patch', 'patch_79_80_b.sql|dbfile_registry_unique_key');
+INSERT INTO meta (species_id, meta_key, meta_value) VALUES (NULL, 'patch', 'patch_79_80_c.sql|stable_id_changed_to_varchar');
+
 
 /**
 @table meta_coord
