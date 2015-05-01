@@ -12,7 +12,6 @@ use feature qw(say);
 use Bio::EnsEMBL::Funcgen::Utils::EFGUtils qw(create_Storable_clone dump_data);
 use Bio::EnsEMBL::Utils::Exception qw(throw);
 use Bio::EnsEMBL::Funcgen::DBSQL::TrackingAdaptor;
-use Bio::EnsEMBL::Funcgen::CellType;
 
 use Bio::EnsEMBL::Utils::SqlHelper;
 
@@ -24,9 +23,10 @@ main();
 
 sub main {
 
+  die "Continue at line 417. Same actions in dev as in tr";
+
   my $cfg = Config::Tiny->new;
      $cfg = Config::Tiny->read(CONFIG);
-  # print Dumper($cfg);die;
 
   _get_cmd_line_options($cfg);
 
@@ -50,18 +50,75 @@ sub main {
   #  _unlock_meta_table($cfg,'dbh_dev',);
 
 }
+#-------------------------------------------------------------------------------
 
+
+################################################################################
+#                           print_method
+################################################################################
+
+=head2
+
+  Name       : print_method
+  Example    : print_method()
+  Description: Prints the name of the calling method, used for debuging
+  Returntype : none
+  Exceptions : none
+  Caller     : general
+  Status     : stable
+
+=cut
+
+#-------------------------------------------------------------------------------
 sub print_method {
  my $parent_function = (caller(1))[3];
  say $parent_function; 
 }
+#-------------------------------------------------------------------------------
 
+
+################################################################################
+#                           _unlock_meta_table
+################################################################################
+
+=head2
+
+  Name       : _unlock_meta_table
+  Example    : _unlock_meta_table($cfg, $dbh_name)
+  Description: Prints the name of the calling method, used for debuging
+  Returntype : none
+  Exceptions : none
+  Caller     : general
+  Status     : at risk - work in progress
+
+=cut
+
+#----------------------------------------------------------------------------
 sub _unlock_meta_table {
   my	($cfg, $dbh_name)	= @_;
 
   $cfg->{$dbh_name}->do("DELETE FROM meta WHERE meta_id = $cfg->{lock_id}");
 }
+#-------------------------------------------------------------------------------
 
+
+################################################################################
+#                           _lock_meta_table
+################################################################################
+
+=head2
+
+  Name       : _lock_meta_table
+  Example    : _lock_meta_table($cfg, $dbh_name)
+  Description: Locks meta table of DB to prevent multiple parallel migrations 
+  Returntype : none
+  Exceptions : Multiple locks, locked already, uncaught exception/state
+  Caller     : general
+  Status     : at risk - work in progress
+
+=cut
+
+#----------------------------------------------------------------------------
 sub _lock_meta_table {
   my	($cfg, $dbh_name)	= @_;
 
@@ -69,7 +126,8 @@ sub _lock_meta_table {
   my $db = $1;
   throw("Wrong dbh name format: $dbh_name") if(!defined $db);
 
-  # Once Nathan is finished adding pipeline status to meta table, check for those as well
+  # Once Nathan is finished adding pipeline status to meta table, 
+  # check for those as well
   my $lock = $cfg->{$dbh_name}->selectall_arrayref(
       "SELECT meta_value FROM meta WHERE meta_key = 'migration';"
       );
@@ -115,11 +173,15 @@ sub _lock_meta_table {
   }
   return ;
 } ## --- end sub _lock_meta_table
+#-------------------------------------------------------------------------------
+
+
 ################################################################################
 #                           _Get_Cmd_Line_Options
 ################################################################################
 
 =head2
+
   Arg [1]    : Config::Tiny $cfg
   Example    : _Get_cmd_line_options($cfg)
   Description: add command line options
@@ -135,7 +197,7 @@ sub _get_cmd_line_options {
   my ($cfg) = @_;
   
 
-  GetOptions(
+  GetOptions( 
       $cfg->{user_options} ||= {},
       'overwrite|o',
       );
@@ -143,7 +205,7 @@ sub _get_cmd_line_options {
 
 
 ################################################################################
-#                           _Connect_To_ReleaseDB
+#                           _connect_to_devDB
 ################################################################################
 
 =head2
@@ -180,6 +242,9 @@ sub _connect_to_devDB {
 #-------------------------------------------------------------------------------
 
 
+################################################################################
+#                           _connect_to_trackingDB
+################################################################################
 
 =head2
 
@@ -216,7 +281,7 @@ sub _connect_to_trackingDB {
 
 
 ################################################################################
-#                            _Get_Current_Data_Sets
+#                            _get_current_Data_Sets
 ################################################################################
 
 =head2
@@ -283,6 +348,7 @@ sub _get_current_data_sets {
   Status     : At risk - not tested
   Notes:     : FeatureType - Segmentation has an analysis linked. This should
                 probably be compared to FeatureSet Analysis.
+                Only FeatureSets be migrated
 
 
 =cut
@@ -296,9 +362,9 @@ sub _migrate {
   
   DATASET:
   for my $tr_ds(@{$cfg->{release}->{data_set}}) {
+    
     my ($tr, $dev) = ({},{});
     next if($tr_ds->feature_type eq 'RegulatoryFeature' && $flag_rf == 0);
-
 
     if($tr_ds->feature_type eq 'RegulatoryFeature'){
       _migrate_regulatory_feature($cfg, $tr_ds);
@@ -315,12 +381,17 @@ sub _migrate {
 }## --- end sub _migrate
 #-------------------------------------------------------------------------------
 
+
+################################################################################
+#                                _migrate_feature_set
+################################################################################
+
 =head2
 
   Name       : _migrate_feature_set
   Arg [1]    :
   Example    :
-  Description:
+  Description: 
   Returntype :
   Exceptions :
   Caller     : general
@@ -338,6 +409,15 @@ sub _migrate_feature_set {
   if(defined $dev_ds){ 
     $dev->{ds} = $dev_ds;
     _compare_data_set($cfg, $tr->{ds}, $dev->{ds});
+
+    $tr->{fs} = $tr->{ds}->product_FeatureSet;
+    my $dev_fs = $dev->{ds}->product_FeatureSet;
+    if (! defined $dev_ds){
+      $dev_fs = $cfg->{dev_adaptors}->{fs}->fetch_by_name($tr->{fs}->name);
+      if(defined ($dev_fs))
+    }
+    _compare_feature_set($cfg, $tr, $dev);
+
     #avoid $dev->{ds} = undefined
   }
 
@@ -349,6 +429,7 @@ sub _migrate_feature_set {
     _compare_feature_set_data_set($cfg, $dev_fs, $tr->{ds}, $tr, $dev);
   }
 
+
   $tr->{rs} = $tr->{ds}->get_supporting_sets;
   foreach my $tr_rs (@{$tr->{rs}}){
     my $dev_rs = $cfg->{dev_adaptors}->{rs}->fetch_by_name($tr_rs->name);
@@ -359,20 +440,17 @@ sub _migrate_feature_set {
     }
 
     $tr->{iss} = $tr_rs->get_support;
-    delete $dev->{iss};
-
+    say "ISS: " . scalar(@{$tr->{iss}});
+    say "rs name: " . $tr_rs->name;
     foreach my $tr_iss (@{$tr->{iss}}){
       my $dev_iss = $cfg->{dev_adaptors}->{iss}->fetch_by_name($tr_iss->name);
       if(defined $dev_iss){
-        say "trNamr: " .$tr_iss->name;
-        say "Dev name: " . $dev_iss->name;
-        say "tr FT: " . $tr_iss->feature_type->name;
-        say "dv FT: " . $dev_iss->feature_type->name;
         _compare_input_subset($cfg, $tr_iss, $dev_iss, $tr, $dev);
         _compare_input_subset_data_set($cfg, $dev_iss, $tr->{ds}, $tr, $dev);
         push(@{$dev->{iss}}, $dev_iss);
-      }
+      } 
     }
+
 
     $tr->{exp} = $tr_rs->experiment;
     my $dev_exp = $cfg->{dev_adaptors}->{ex}->fetch_by_name($tr->{exp}->name);
@@ -405,6 +483,7 @@ sub _migrate_feature_set {
   Exceptions :
   Caller     : general
   Status     : At risk - not tested
+  ToDo       : Check store methods if reassinging is necessary. Object always updated?
 
 =cut
 
@@ -417,7 +496,6 @@ sub _migrate_cell_feature_type {
   $tr->{ft} = $tr->{ds}->feature_type;
 
   my $ct_name = $tr->{ct}->name;
-
   my $dev_ct = $cfg->{dev_adaptors}->{ct}->fetch_by_name($ct_name);
 
   if(defined $dev_ct){
@@ -434,7 +512,7 @@ sub _migrate_cell_feature_type {
 
   if(defined $dev_ft){
     $dev->{ft} = $dev_ft;
-      _compare_feature_type($cfg, $tr, $dev);
+    _compare_feature_type($cfg, $tr, $dev);
   }
   else {
     $dev->{ft}   = create_Storable_clone ($tr->{ft});
@@ -444,9 +522,13 @@ sub _migrate_cell_feature_type {
 #-------------------------------------------------------------------------------
 
 
+################################################################################
+#                           print_cached_objects
+################################################################################
+
 =head2
 
-  Name       : 
+  Name       : print_cached_objects
   Arg [1]    :
   Example    :
   Description:
@@ -460,7 +542,7 @@ sub _migrate_cell_feature_type {
 #-------------------------------------------------------------------------------
 sub print_cached_objects {
   my ($cfg, $tr, $dev, $error) = @_;
-  
+
   my $parent  = (caller(1))[3];
   my $gparent = (caller(2))[3];
 
@@ -477,9 +559,14 @@ sub print_cached_objects {
 }
 #-------------------------------------------------------------------------------
 
+
+################################################################################
+#                                 _iterate
+################################################################################
+
 =head2
 
-  Name       : 
+  Name       : _iterate
   Arg [1]    :
   Example    :
   Description:
@@ -487,6 +574,8 @@ sub print_cached_objects {
   Exceptions :
   Caller     : general
   Status     : At risk - not tested
+  ToDo       : Better neame, print cache objects, print_objects_by_type
+                Map for ARRAY block?
 
 =cut
 
@@ -510,9 +599,14 @@ sub _iterate {
 }
 #-------------------------------------------------------------------------------
 
+
+################################################################################
+#                                 _iterate
+################################################################################
+
 =head2
 
-  Name       : 
+  Name       : _print_object
   Arg [1]    :
   Example    :
   Description:
@@ -520,6 +614,7 @@ sub _iterate {
   Exceptions :
   Caller     : general
   Status     : At risk - not tested
+  ToDo       : Merge first attrib loop, 3indent rule, pass indent as parameter
 
 =cut
 
@@ -543,6 +638,7 @@ sub _print_object {
 
   say "\n".ref($object);
   
+
   for my $attr (@attributes){
     if( $object->can($attr) ) {
       say $attr .': '. $object->$attr;
@@ -559,7 +655,7 @@ sub _print_object {
             say "\t\t$attr: ".$object->$method->$attr;
           }
           else {
-            say "\t\t$attr: Undefinded, ' $method ' for this object likely optional";
+            say "\t\t$attr: Undefinded, ' $method ' likely optional";
           }
         }
       }
@@ -568,11 +664,12 @@ sub _print_object {
 }
 
 ################################################################################
-
+#                                 _migrate_regulatory_feature
+################################################################################
 
 =head2
 
-  Name       : 
+  Name       : _migrate_regulatory_feature
   Arg [1]    :
   Example    :
   Description:
@@ -591,11 +688,13 @@ sub _migrate_regulatory_feature {
 
 
 
-# --------------- meta data ----------------
+################################################################################
+#                              _add_control_experiment
+################################################################################
 
 =head2
 
-  Name       : 
+  Name       : _add_control_experiment
   Arg [1]    :
   Example    :
   Description:
@@ -636,9 +735,13 @@ die "Needs reimplementing";
 # Store in devDB if not present
 # Create Storable clone and add to dev data structure
 
+###############################################################################
+#                            _store_experimental_group
+###############################################################################
+
 =head2
 
-  Name       : 
+  Name       : _store_experimental_group
   Arg [1]    :
   Example    :
   Description:
@@ -658,15 +761,17 @@ sub _store_experimental_group {
   $dev->{exp_group} = create_Storable_clone(
     $tr->{exp_group}  
   );
-  say ref($tr->{exp_group});
-  $dev->{exp_group} = @{$cfg->{dev_adaptors}->{eg}->store($dev->{exp_group})};
-  say 'expg: ' . ref($dev->{exp_group});
+  $cfg->{dev_adaptors}->{eg}->store($dev->{exp_group});
 }
 #-------------------------------------------------------------------------------
 
+###############################################################################
+#                            _store_experiment
+###############################################################################
+
 =head2
 
-  Name       : 
+  Name       : _store_experiment
   Arg [1]    :
   Example    :
   Description:
@@ -688,17 +793,21 @@ sub _store_experiment {
     -experimental_group => $dev->{exp_group},
     -feature_type       => $dev->{ft},
     });
-  ($dev->{exp}) = @{$cfg->{dev_adaptors}->{ex}->store($dev->{exp})};
+  $cfg->{dev_adaptors}->{ex}->store($dev->{exp});
 
   my $states = $tr->{exp}->get_all_states;
   _add_states($cfg, $states, $dev->{exp});
 
 }
-#-------------------------------------------------------------------------------
+#------------------------------------------------------------------------------
+
+###############################################################################
+#                            _store_input_subset
+###############################################################################
 
 =head2
 
-  Name       : 
+  Name       : _store_input_subset
   Arg [1]    :
   Example    :
   Description:
@@ -709,13 +818,13 @@ sub _store_experiment {
 
 =cut
 
-#-------------------------------------------------------------------------------
+#------------------------------------------------------------------------------
 sub _store_input_subset {
   my ($cfg, $tr_iss, $tr, $dev) = @_;
 
   print_method();
 
-  my $dev_anal = _get_or_store_analysis($cfg, $tr_iss->analysis, $tr, $dev);
+  my $dev_anal = _fetch_or_store_analysis($cfg, $tr_iss->analysis, $tr, $dev);
   
   my $dev_iss  = create_Storable_clone($tr_iss, {
       -analysis     => $dev_anal,
@@ -724,19 +833,25 @@ sub _store_input_subset {
       -feature_type => $dev->{ft},
       });
   
-  ($dev_iss) = @{$cfg->{dev_adaptors}->{iss}->store($dev_iss)};
+  $cfg->{dev_adaptors}->{iss}->store($dev_iss);
 
   my $states = $tr_iss->get_all_states;
-  _add_states($cfg, $states, $dev_iss);
-  $cfg->{dev_adaptors}->{iss}->store_states($dev_iss);
-
+  
+  if(scalar (@{$states}) ){
+    _add_states($cfg, $states, $dev_iss);
+    $cfg->{dev_adaptors}->{iss}->store_states($dev_iss);
+  }
   push(@{$dev->{iss}}, $dev_iss);
 }
-#-------------------------------------------------------------------------------
+#------------------------------------------------------------------------------
+
+###############################################################################
+#                            _store_result_set
+###############################################################################
 
 =head2
 
-  Name       : 
+  Name       : _store_result_set
   Arg [1]    :
   Example    :
   Description:
@@ -747,13 +862,13 @@ sub _store_input_subset {
 
 =cut
 
-#-------------------------------------------------------------------------------
+#------------------------------------------------------------------------------
 sub _store_result_set {
   my ($cfg, $tr_rs, $tr, $dev) = @_;
 
   print_method();
 
-  my $dev_anal = _get_or_store_analysis($cfg, $tr_rs->analysis, $tr, $dev);
+  my $dev_anal = _fetch_or_store_analysis($cfg, $tr_rs->analysis, $tr, $dev);
 
   # say dump_data($tr_rs,1,1);
   # say dump_data($dev->{iss},1,1);
@@ -766,15 +881,20 @@ sub _store_result_set {
       -support      => $dev->{iss},
       });
 
-  ($dev_rs) = @{$cfg->{dev_adaptors}->{rs}->store($dev_rs)};
+  $cfg->{dev_adaptors}->{rs}->store($dev_rs);
 
   my $states = $tr_rs->get_all_states;
-
-  _add_states($cfg, $states, $dev_rs);
-  $cfg->{dev_adaptors}->{rs}->store_states($dev_rs);
-
+  if(scalar (@{$states}) ){
+    _add_states($cfg, $states, $dev_rs);
+    $cfg->{dev_adaptors}->{rs}->store_states($dev_rs);
+  }
   push(@{$dev->{rs}}, $dev_rs);
 }
+#-------------------------------------------------------------------------------
+
+###############################################################################
+#                            _store_feature_set
+###############################################################################
 
 =head2
 
@@ -795,7 +915,7 @@ sub _store_feature_set {
 
   print_method();
 
-  my $dev_anal = _get_or_store_analysis($cfg, $tr->{fs}->analysis, $tr, $dev);
+  my $dev_anal = _fetch_or_store_analysis($cfg, $tr->{fs}->analysis, $tr, $dev);
 
   $dev->{fs} = create_Storable_clone($tr->{fs},{
         -analysis     => $dev_anal,
@@ -803,10 +923,13 @@ sub _store_feature_set {
         -experiment   => $dev->{exp},
         -feature_type => $dev->{ft},
         });
-    ($dev->{fs}) =  @{$cfg->{dev_adaptors}->{fs}->store($dev->{fs})};
+    $cfg->{dev_adaptors}->{fs}->store($dev->{fs});
 }
 #-------------------------------------------------------------------------------
 
+################################################################################
+#                            _store_data_set
+################################################################################
 
 =head2
 
@@ -831,14 +954,17 @@ sub _store_data_set {
         -feature_set      => $dev->{fs},
         -supporting_sets  => $dev->{iss},
         });
-    ($dev->{ds}) =  @{$cfg->{dev_adaptors}->{ds}->store($dev->{ds})};
-say "stored";
+  $cfg->{dev_adaptors}->{ds}->store($dev->{ds});
 }
 #-------------------------------------------------------------------------------
 
+################################################################################
+#                            _fetch_or_store_analysis
+################################################################################
+
 =head2
 
-  Name       : _get_or_store_analysis
+  Name       : _fetch_or_store_analysis
   Arg [1]    :
   Example    :
   Description:
@@ -850,7 +976,7 @@ say "stored";
 =cut
 
 #-------------------------------------------------------------------------------
-sub _get_or_store_analysis {
+sub _fetch_or_store_analysis {
   my ($cfg, $tr_anal, $tr, $dev) = @_;
 
   print_method();
@@ -863,18 +989,21 @@ sub _get_or_store_analysis {
   }
   else {
     $dev_anal = _create_storable_analysis($cfg, $tr_anal);
-    my $id    = $cfg->{dev_adaptors}->{an}->store($dev_anal);
-    $dev_anal = $cfg->{dev_adaptors}->{an}->fetch_by_dbID($id);
+    $cfg->{dev_adaptors}->{an}->store($dev_anal);
   }
-
   return $dev_anal;
 }
 
-#-------------------------------------------------------------------------------
+
+
+
+################################################################################
+#                            _create_storable_analysis
+################################################################################
 
 =head2
 
-  Name       : 
+  Name       : _create_storable_analysis
   Arg [1]    :
   Example    :
   Description:
@@ -895,10 +1024,13 @@ sub _create_storable_analysis {
   $dev_analysis = bless({%{$analysis}}, ref($analysis));
   $dev_analysis->{adaptor} = undef;
   $dev_analysis->{dbID}    = undef;
-  my $dbID    = $cfg->{dev_adaptors}->{an}->store($dev_analysis);
-  $dev_analysis = $cfg->{dev_adaptors}->{an}->fetch_by_dbID($dbID);
   return($dev_analysis);
 }
+#-------------------------------------------------------------------------------
+
+################################################################################
+#                            _store_in_dev
+################################################################################
 
 =head2
 
@@ -986,10 +1118,15 @@ sub _store_in_dev {
   #    my $AR_annotated_features =
   #      $cfg->{tr_adaptors}->{af}->fetch_all_by_FeatureSets([$tr_fset]);
 }
+#-------------------------------------------------------------------------------
+
+################################################################################
+#                            _add_states
+################################################################################
 
 =head2
 
-  Name       : 
+  Name       : _add_states
   Arg [1]    :
   Example    :
   Description:
@@ -1016,9 +1153,15 @@ sub _add_states {
   }
 }
 
+
+################################################################################
+#                                 _get_dev_states
+################################################################################
+
+
 =head2
 
-  Name       : 
+  Name       : _get_dev_states
   Arg [1]    :
   Example    :
   Description:
@@ -1026,6 +1169,7 @@ sub _add_states {
   Exceptions :
   Caller     : general
   Status     : At risk - not tested
+  ToDo       : Move to TrackingAdaptor
 
 =cut
 
@@ -1085,6 +1229,7 @@ sub _get_dev_states {
 sub _migrate_annotated_feature {
   my ($cfg, $feature_set) = @_;
 
+die "Check";
 
   my $tr_db   = $cfg->{efg_db}->{db_name};
   my $dev_db  = $cfg->{dev_db}->{db_name};
@@ -1178,7 +1323,9 @@ sub _compare_analysis {
   Exceptions :
   Caller     : general
   Status     : At risk - not tested
-
+  ToDo       : Check if -1 is needed for these objects,
+              Change _check_tmp to return $error
+              Change to compare_shallow?
 =cut
 
 #-------------------------------------------------------------------------------
@@ -1444,6 +1591,7 @@ sub _compare_feature_set_data_set {
 
   my $error = undef;
 
+
   if($fs->cell_type->name ne $ds->cell_type->name){
     $error .= "CellType missmatch [FS/DS] " . $fs->cell_type->name.'|';
     $error .= $ds->cell_type->name;
@@ -1455,8 +1603,8 @@ sub _compare_feature_set_data_set {
   }
 
   if($fs->experiment->name ne $ds->experiment->name){
-    $error .= "Experiment missmatch [FS/DS] " . $fs->cell_type->name.'|';
-    $error .= $ds->cell_type->name;
+    $error .= "Experiment missmatch [FS/DS] " . $fs->experiment->name.'|';
+    $error .= $ds->experiment->name;
   }
 
   if(defined ($error) ){
@@ -1498,11 +1646,13 @@ sub _compare_input_subset_data_set {
     if($iss->feature_type->name ne $ds->feature_type->name){
       $error .= "FeatureType missmatch [ISS/DS] ".$iss->feature_type->name.'|';
       $error .= $ds->feature_type->name ."\n";
+      $error .= 'dbID: ' . $iss->dbID."\n";
+      $error .= 'ref: ' . ref($iss)."\n";
     }
   }
   if(defined ($error) ){
     $error = "--- _compare_input_subset_data_set ---\n" . $error;
-      say dump_data($iss,1,1);
+      # say dump_data($iss,1,1);
 
     push(@{$dev->{iss}}, $iss);
     print_cached_objects($cfg, $tr, $dev, $error);
@@ -1823,820 +1973,3 @@ sub _get_trackingDB_adaptors {
 
 =cut
 
-ddd
-# ################################################################################
-# #                            _Compare_Cell_Type
-# ################################################################################
-
-# =head2
-
-#   Name       :
-#   Arg [1]    :
-#   Example    :
-#   Description:
-#   Returntype :
-#   Exceptions :
-#   Caller     : general
-#   Status     : At risk - not tested
-
-# =cut
-
-# #-------------------------------------------------------------------------------
-# #cell_type_id, name, display_label, description, gender, efo_id, tissue,
-# sub _compare_cell_type {
-#   my ($name, $tr_ds, $dev_ds, $tr_ct, $dev_ct) = @_;
-
-#   my $tmp = $tr_ds->compare_to($dev_ds,'-1');
-#   if(defined _check_tmp($tmp)){
-#     my $msg;
-#     $msg = "CellType "
-#   }
-  
-#   return;
-# }
-#-------------------------------------------------------------------------------
-
-# ################################################################################
-# #                             _Compare_feature_type
-# ################################################################################
-
-
-# #-------------------------------------------------------------------------------
-# sub _compare_feature_type {
-#   my ($diffs, $tr_ds, $dev_ds, $tr_ft, $dev_ft) = @_;
-
-#   my $tmp = $tr_ft->compare_to($dev_ft,'-1');
-#   _check_tmp($diffs, $tmp, $tr_ds->name, $tr_ds->feature_type->name);
-
-#   if(defined $tr_ft->analysis){
-#     my $tr_analysis  = $tr_ft->analysis;
-#     my $dev_analysis = $dev_ft->analysis;
-
-#     $tr_ft->analysis->compare_to($dev_ft->analysis, '-1');
-#     _check_tmp($diffs, $tmp, , 'analysis');
-#   }
-#   return $diffs;
-# }
-# #-------------------------------------------------------------------------------
-
-# #-------------------------------------------------------------------------------
-# #analysis_id, created, logic_name, db, db_version, db_file, program, program_version, program_file,
-# # parameters, module, module_version, gff_source, gff_feature
-# ################################################################################
-# #                           _Compare_Analysis
-# ################################################################################
-
-# #-------------------------------------------------------------------------------
-# sub _compare_analysis {
-#   my ($tr_analysis, $dev_analysis) = @_;
-
-#   unless($tr_analysis->compare($dev_analysis) == 0){
-#     return('Tr: '.$tr_analysis->dbID . ' - Dev: ' . $dev_analysis->dbID);
-#   }
-# }
-# #-------------------------------------------------------------------------------
-# # creates a hash containing the differences, eg:
-# # $diffs->{result_set}->{analysis} = name1 - name2
-# # avoids creating an empty data strucutre
-# sub _check_tmp {
-#   my ($tmp) = @_;
-
-#   if (ref($tmp) eq 'HASH' and  keys %{$tmp}){
-#     return $tmp;
-#   }
-#   return undef;
-# }
-
-################################################################################
-# #                         _Compare_Experimental_Group
-# ################################################################################
-
-# =head2
-
-#   Name       :
-#   Arg [1]    :
-#   Example    :
-#   Description:
-#   Returntype :
-#   Exceptions :
-#   Caller     : general
-#   Status     : At risk - not tested
-
-# =cut
-
-# #-------------------------------------------------------------------------------
-# #experimental_group_id, name, location, contact, description, url, is_project
-# #-------------------------------------------------------------------------------
-# sub _compare_experimental_group {
-#   my ($diffs, $tr, $dev) = @_;
-#   my $tmp =$tr->{experimental_group}->compare_to($dev->{experimental_group},'-1');
-
-#   if(keys %{$tmp}) {
-#     $diffs->{experimental_group} = $tmp;
-#     return $diffs;
-#   }
-# }
-# #-------------------------------------------------------------------------------
-
-#sub _check_and_print_diffs {
-#   my ($tr, $dev, $diffs) = @_;
-
-#   foreach my $key (sort keys %{$diffs}){
-#     next if($key eq 'stored');
-#     say "Mismatches detected. First array element is tracking data, second dev data";
-#     print dump_data($diffs,1,1);
-#     _print_info($tr, 'Tracking');
-#     _print_info($dev, 'Dev');
-#     say "Exiting.....";
-#     die;
-#   }
-
-# }
-# sub _print_info {
-#   my ($db_objects, $db) = @_;
-
-#   say "************ Currently stored in $db cache ************ ";
-#   foreach my $type (sort keys %{$db_objects}){
-
-#     my $string;
-#     if ( $type =~ /_/ ){
-#       my @type = split(/_/,$type);
-#       for my $tmp (@type) {
-#         $string .= ucfirst($tmp);
-#       }
-#     }
-#     else{
-#       $string = ucfirst($type);
-#     }
-
-#     if(defined $db_objects->{$type}){
-#       # arrays
-#       if($type =~ /input_sets|result_sets|input_subsets/){
-#         say "::: $string";
-#         for my $is(@{$db_objects->{$type}}){
-#           say "name:\t". $is->name;
-#           say "dbID:\t". $is->dbID;
-#           if($type =~ /input_sets|result_sets/){
-#             say "::: $string Analysis";
-#             say "name:\t" . $is->analysis->logic_name;
-#             say "dbID:\t" . $is->analysis->dbID;
-#           }
-#         }
-#       }
-#       else {
-#         say "::: $string";
-#         if ($type eq 'analysis'){
-#           say "name:\t" . $db_objects->{$type}->logic_name;
-#         }
-#         else {
-#           say " name:\t" . $db_objects->{$type}->name;
-#         }
-
-#         say " dbID:\t" . $db_objects->{$type}->dbID;
-#       }
-#     }
-#     else{
-#       say "::: $string";
-#       say "__Undefined__";
-#     }
-#     say '';
-#   }
-
-#   say "***************** End of $db cache ******************\n";
-# }
-
-
-#linked to input set
-## status_name (The status table also needs to be considered for all table which have status entries.)
-##* Check where to get status_name
-# ---------------------------------------------------------------------
-
-# Tries to retrieve dev object using unique constraints
-# If the object exists in dev, compare it to the tracking object
-# Differences are stored in diffs hash
-
-# sub _validate_dev {
-#     my ($cfg ,$tr, $dev, $name, $diffs) = @_;
-
-#     $dev->{experiment} =
-#       $cfg->{dev_adaptors}->{experiment}->fetch_by_name($tr->{experiment}->name);
-#     if(defined $dev->{experiment}){
-#       _compare_experiment($diffs, $tr, $dev);
-#     }
-#     else{
-#       $dev->{experiment}   = create_Storable_clone(
-#         $tr->{experiment},
-#         {-EXPERIMENTAL_GROUP => $dev->{experimental_group}});
-#       ($dev->{experiment}) =  @{$cfg->{dev_adaptors}->{experiment}->store($dev->{experiment})};
-#       $cfg->{stored_objects}->{experiment} = $dev->{experiment};
-#     }
-
-
-#     # InputSubset could be control.
-#     if(defined $tr->{input_subsets}){
-#       for my $tr_iss (@{$tr->{input_subsets}}){
-#         my $name = $tr_iss->name;
-#         my $exp  = $tr_iss->experiment;
-#         my $dev_exp;
-
-#         if($exp->name ne $dev->{experiment}->name){
-#           if(!$tr_iss->is_control){
-#             throw("Subset $name has a different Experiment, but is not control");
-#           }
-#           $dev_exp = $cfg->{dev_adaptors}->fetch_by_name($exp->name);
-#           if(!defined $dev_exp){
-#             throw("Experiment not available in devDB");
-#           }
-#         }
-#         else{
-#           $dev_exp = $dev->{experiment};
-#         }
-
-#         my ($dev_iss) =
-#           @{$cfg->{dev_adaptors}->{input_subset}->fetch_by_name_and_experiment($name, $dev_exp)};
-#           if(defined $dev_iss){
-
-
-#             _compare_input_subset($diffs, $tr_iss, $dev_iss, $tr, $dev);
-#             push(@{$dev->{input_subsets}}, $dev_iss);
-#           }
-
-#       }
-#     }
-
-
-# #UNIQUE KEY `unique_idx` (`name`,`analysis_id`,`feature_type_id`,`cell_type_id`,`feature_class`)
-#     my $flag = 0;
-#     if(defined $tr->{result_sets} ){
-#       $flag = 1;
-#       for my $tr_result_set(@{$tr->{result_sets}}){
-#         my @dev_result_sets = @{$cfg->{dev_adaptors}->{result_set}->fetch_all_by_name(
-#             $tr_result_set->name,
-#             $dev->{feature_type},
-#             $dev->{cell_type},
-#             $dev->{analysis},
-#             )};
-
-#         my $count = scalar(@dev_result_sets);
-#         if($count > 1){
-#           throw("Only expecting 1 ResultSet here, not $count");
-#         }
-#         if($count == 1){
-#           my $dev_result_set = $dev_result_sets[0];
-#           _compare_result_set($diffs, $tr_result_set, $dev_result_set, $tr, $dev);
-#           push(@{$dev->{result_sets}},$dev_result_set);
-#         }
-#       }
-
-#     }
-#     if(defined $tr->{input_sets}){
-
-#       $flag = 1;
-#       for my $tr_input_set( @{$tr->{input_sets}}) {
-#         my $dev_input_set = $cfg->{dev_adaptors}->{input_set}->fetch_by_name($tr_input_set->name);
-
-#         if(defined $dev_input_set){
-#           _compare_input_set($diffs, $tr_input_set, $dev_input_set, $tr, $dev,'input_set');
-#           push(@{$dev->{input_sets}},$dev_input_set);
-#         }
-
-#       }
-#     }
-#     if($flag == 0){throw("No InputSet & ResultSet for: " . $tr->{data_set}->name)}
-
-
-#     if(defined $tr->{feature_set}){
-#       $dev->{feature_set} = $cfg->{dev_adaptors}->{feature_set}->fetch_by_name($tr->{feature_set}->name);
-#       if(defined $dev->{feature_set}){
-#         _compare_feature_set($diffs, $tr, $dev);
-#       }
-#     }
-#     else{throw ("No FeatureSet for: ".$tr->{data_set}->name)}
-
-#     $dev->{data_set} =
-#         $cfg->{dev_adaptors}->{data_set}->fetch_by_name($tr->{data_set}->name);
-#     if( defined $dev->{data_set}){
-#         _compare_data_set($diffs, $tr, $dev);
-#     }
-# }
-# sub _merge_diffs {
-#   my ($diffs, $tmp) = @_;
-#   foreach my $key (sort keys %{$tmp} ) {
-#     if( exists $diffs->{$key} ) {
-#       throw("Key [$key] is already present in diffs!");
-#     }
-#     else {
-#       $diffs->{$key} = $tmp->{$key};
-#     }
-#   }
-# }
-# sub _add_metadata {
-#   my ($cfg, $tr, $dev, $diffs) = @_;
-
-#   _metadata_migration($cfg, 'cell_type',          $tr, $dev, $diffs);
-#   _metadata_migration($cfg, 'feature_type',       $tr, $dev, $diffs);
-#   _metadata_migration($cfg, 'experimental_group', $tr, $dev, $diffs);
-
-# }
-# ################################################################################
-# #                             _MetaData_Migration
-# ################################################################################
-
-# =head2
-
-#   Name       :
-#   Arg [1]    :
-#   Example    :
-#   Description:
-#   Returntype :
-#   Exceptions :
-#   Caller     : general
-#   Status     : At risk - not tested
-#   ToDo       : using proper ref() instead of manual one
-#                Check if all mandatory args are defined
-#                Get nj1's untility for fetch_by_(logic)_name
-
-# =cut
-
-# #-------------------------------------------------------------------------------
-# sub _metadata_migration {
-#   my ($cfg, $type, $tr, $dev, $diffs) = @_;
-
-#   my $dev_object;
-
-#     my $name = $tr->{$type}->name();
-#     $dev_object = $cfg->{dev_adaptors}->{$type}->fetch_by_name($name);
-
-#   if(! defined $dev_object) {
-#     $dev_object = create_Storable_clone($tr->{$type});
-#     ($dev_object) = @{$cfg->{dev_adaptors}->{$type}->store($dev_object)};
-#     $dev->{$type} = $dev_object;
-#   }
-#   else {
-#     $dev->{$type} = $dev_object;
-
-#     my $tmp;
-#     if($type eq 'cell_type'){
-#       $tmp = _compare_cell_type($diffs, $tr, $dev);
-#     }
-#     elsif($type eq 'experimental_group'){
-#       $tmp = _compare_experimental_group($diffs, $tr, $dev);
-#     }
-#     elsif($type eq 'feature_type'){
-#       $tmp = _compare_feature_type($diffs, $tr, $dev);
-#     }
-#     else{
-#       throw('Type: \''.$type ."' not known. Add it above");
-#     }
-
-#     if(ref($tmp) eq 'HASH' and keys %{$tmp}){
-#       _merge_diffs($diffs, $tmp);
-#     }
-#   }
-#   return();
-# }
-# ################################################################################
-# #                            _Get_Input_Set
-# ################################################################################
-
-# =head2
-
-#   Name       : _get_input_set
-#   Arg [1]    : Bio::EnsEMBL::Funcgen::DataSet
-#   Example    : _get_input_set($data_set)
-#   Description: Retrieves the supporting InputSets for this DataSet
-#   Returntype :
-#   Exceptions :
-#   Caller     : general
-#   Status     : At risk - not tested
-
-# =cut
-
-# #-------------------------------------------------------------------------------
-# # ???? One or more supporting InputSets possible?
-# sub _get_input_set {
-#   my ($set) = @_;
-
-#   my @input_sets;
-
-#   if(ref($set) ne 'Bio::EnsEMBL::Funcgen::DataSet'){
-#     throw("Must be Bio::EnsEMBL::Funcgen::DataSet, not: " . ref($set));
-#   }
-#   @input_sets = @{$set->get_supporting_sets('input')};
-
-#   my $amount = scalar(@input_sets);
-#   if ($amount != 1) {
-#     my $msg = "Expecting only 1 InputSet, not $amount";
-#     warn($msg);
-#   }
-
-#   return(\@input_sets);
-# }
-# #-------------------------------------------------------------------------------
-
-# Checks if all InputSets are present in both structures
-
-# sub _compare_data_and_result_input_sets {
-#   my ($result_input_sets, $data_input_subsets) = @_;
-
-# # Same size mandatory, otherwise for loop won't work
-#   if(scalar(@{$result_input_sets}) != scalar(@{$data_input_subsets})) {
-#     say "scalar";
-#     say scalar(@{$result_input_sets});
-#     say scalar(@{$data_input_subsets});
-#     say "";
-#     say dump_data($result_input_sets,1,1);
-#     say "-------- ********** :::::: ********** -------";
-#     say dump_data($data_input_subsets,1,1);
-
-#     throw("Mismatch between InputSets linked to ResultSets and DataSet");
-#   }
-#   for my $data_is(@{$data_input_subsets}){
-#     my $flag = 0;
-#     for my $result_is (@{$result_input_sets}) {
-#       if($result_is->dbID == $data_is->dbID){
-#         $flag = 1;
-#       }
-#     }
-#     if($flag == 0){
-#       throw("InputSet " . $data_is->dbID .'[dbID] not found in ResultSets')
-#     }
-#   }
-# }
-
-# ################################################################################
-# #                            _get_result_sets
-# ################################################################################
-
-# =head2
-
-#   Name       : _get_result_sets
-#   Arg [1]    :
-#   Example    :
-#   Description:
-#   Returntype : ARRAY_REF
-#   Exceptions :
-#   Caller     : general
-#   Status     : At risk - not tested
-
-# =cut
-
-# #-------------------------------------------------------------------------------
-# sub _get_result_sets {
-#   my ($data_set) = @_;
-#   my $result_set;
-
-#   my @result_sets = @{$data_set->get_supporting_sets('result',)};
-
-#   my $iss_dbIDs = {};
-#   for my $result_set(@result_sets){
-#     my @input_subsets = @{$result_set->get_support};
-
-#     # InputSets linked to a ResultSet should not be identical
-#     # This should currently not happen, adjust code if it does
-#     for my $input_subset (@input_subsets){
-#       if(exists $iss_dbIDs->{$input_subset->dbID}){
-#         throw("Found duplicate InputSubsets linked to " . $result_set->name);
-#       }
-#       $iss_dbIDs->{$input_subset->dbID}++;
-#     }
-#   }
-
-#   # my @previous_input_sets;
-
-#   # if(@result_sets and scalar(@result_sets) > 0){
-#   #   for my $result_set (@result_sets) {
-
-#   #     my @supporting_sets = @{$result_set->get_support};
-#   #     for my $sset(@supporting_sets){
-#   #       if(ref($sset) ne 'Bio::EnsEMBL::Funcgen::InputSubset'){
-#   #         throw("Only Bio::EnsEMBL::Funcgen::InputSubset supported, not " . ref($sset));
-#   #       }
-#   #       # InputSets linked to a ResultSet should not be identical
-#   #       # This should currently not happen, adjust code if it does
-#   #       for my $previous_input_set (@previous_input_sets){
-#   #         if($sset->dbID eq $previous_input_set->dbID){
-#   #           throw("Same InputSet");
-#   #         }
-#   #       }
-#   #       push(@previous_input_sets, $sset);
-#   #     }
-#   #   }
-#   # }
-#   # return(\@result_sets, \@previous_input_sets);
-# }
-# #-------------------------------------------------------------------------------
-# Test if InputSet is already stored in devDB
-# If it is stored, find out why
-# might be worth thinking about caching
-# sub _test_input_sets {
-#   my ($cfg, $tr_input_sets, $tr_ds) = @_;
-
-#   for my $tr_is(@{$tr_input_sets}){
-#     my $dev_is = $cfg->{dev_adaptors}->{input_set}->fetch_by_name($tr_is->name);
-#     if(defined $dev_is){
-#       my $dev_dss = $cfg->{dev_adaptors}->{data_set}->fetch_all_by_supporting_set($dev_is);
-#       if(scalar @{$dev_dss} != 1){
-#         say dump_data($dev_dss,1,1);
-#         say scalar @{$dev_dss};
-#         die;
-#       }
-#       my $dev_ds    = $dev_dss->[0];
-#       my $dev_peak_caller = _identfiy_peak_caller($dev_ds->name);
-#       my $tr_peak_caller  = _identfiy_peak_caller($tr_ds->name);
-
-#       if($dev_peak_caller ne $tr_peak_caller){
-#         my $name  = $tr_is->name;
-#         my $ds_names = $tr_ds->name .'/'. $dev_ds->name ;
-#         my $pc = "$dev_peak_caller / $tr_peak_caller";
-
-#         throw("InputSet '$name' linked to 2 DataSets($ds_names). Peakcallers: $pc");
-#       }
-#       die;
-#       #DataSet->name == FeatureSet->name
-#       #DataSet->fetch_all_by_FeatureSet ()?
-#     }
-#   }
-# }
-
-# sub _identfiy_peak_caller {
-#   my ($string) = @_;
-
-#   $string = lc($string);
-#   my $peak_caller;
-
-#   if($string =~ /_ccat_/){
-#     $peak_caller = 'CCAT';
-#   }
-#   elsif($string =~ /swembl/ ) {
-#     $peak_caller = 'SWEmbl';
-#   }
-#   else{
-#     $peak_caller = undef;
-#   };
-
-#   return($peak_caller);
-# }
-# 
-
-# sub _get_tracking_release_objects {
-#   my ($cfg, $tr) = @_;
-
-#   $tr->{feature_set}  = $tr->{data_set}->product_FeatureSet();
-#   $tr->{cell_type}    = $tr->{feature_set}->cell_type;
-#   $tr->{feature_type} = $tr->{feature_set}->feature_type;
-
-
-#   # Check if all metadata is present
-#   foreach my $object (sort keys %{$tr}){
-#     if(! defined $tr->{$object}){
-#       throw("Could not fetch '$object' for DataSet: ".$tr->{data_set}->name);
-#     }
-#   }
-# # Why was this?
-#   if($tr->{feature_type}->class eq 'Segmentation State'){
-#     throw('FeatureType - Segmentation has an analysis linked. This '.
-#         'should probably be compared to FeatureSet Analysis.');
-#   }
-#   # say __LINE__ ": FeatureType class: " .$tr->{feature_type}->class;
-
-#   # Only ResultSets
-#   my $supporting_result_sets = $tr->{data_set}->get_supporting_sets;
-
-#   my $supporting_sets = [];
-#   for my $srs(@$supporting_result_sets){
-#     my $input_subsets = $srs->get_support;
-#     for my $iss(@$input_subsets){
-#      push($supporting_sets, $iss);
-#     }
-#   }
-# for my $ss(@$supporting_sets){
-#   say ref($ss);
-# }
-# die;
-
-#   my $result_set_input_subsets = undef;
-#   ($tr->{result_sets}, $result_set_input_subsets)  = _get_result_sets($tr); 
-
-#   my $data_input_subsets = $tr->{data_set}->get_supporting_sets('input');
-#   if(!defined $data_input_subsets->[0]){
-#     say 'Line: ' . __LINE__;
-#     _print_info($tr,'Tracking');
-    
-#   }
-
-#   if(! defined $data_input_subsets){
-#     throw('No InputSet linked to DataSet: '. $tr->{data_set}->name)
-#   }
-
-#   if( scalar( @{$result_set_input_subsets}) and scalar(@{$data_input_subsets})) {
-#     _compare_data_and_result_input_sets($result_set_input_subsets, $data_input_subsets);
-#   }
-
-#   $tr->{input_sets} = $data_input_subsets;
-
-#   $tr->{input_subsets} = _get_input_subsets($cfg, $tr->{input_sets});
-
-
-
-#   ($tr->{experiment}, $tr->{experimental_group}) =
-#    _compare_inputset_experiments($cfg, $data_input_subsets);
-# }
-
-# sub _get_input_subsets {
-#   my ($cfg, $input_sets) = @_;
-
-#   my @subsets;
-#   for my $is (@{$input_sets}){
-#     # !!!!!! Array !!!!!!!!!!
-#     my $tmp_subsets = $cfg->{tr_adaptors}->{iss}->fetch_all_by_InputSet($is);
-
-#     for my $tmp_subset(@{$tmp_subsets}){
-#       for my $stored_subset (@subsets){
-#         if($stored_subset->dbID == $tmp_subset->dbID){
-#           throw("Duplicate InputSubset".$stored_subset->name. $tmp_subset->name);
-#         }
-#       }
-#       push(@subsets, $tmp_subset);
-#     }
-
-#   }
-#   return(\@subsets);
-# }
-
-=head 2
-# DataSets are the starting point in the trackingDB, but the insert into dev starts
-# with Experiment (API constraints)
-
-# -- Supporting ResultSets --
-# Multiple ResultSets can be linked to a DataSet.
-# The InputSets linked to these ResultSets must be the same as the InputSets
-# linked to the DataSet directly.
-# 1. Compare all Experiments from all InputSets to each other. Throw if there is a mismatch
-# 2. Compare all experiments from each Subset to the one from the InputSet it comes from.
-#    If the Experiment does not exist, it is likely to be a control and should be added to
-#    the devDB
-
-# =cut
-
-# sub _compare_inputset_experiments {
-#   my  ($cfg, $input_sets )  = @_;
-
-#   if(defined $input_sets and scalar(@{$input_sets}) > 0 ){
-
-# # Test if all experiments are identical between InputSets
-# # Having the 2 for loops creates redundant tests, including comparing the same
-# # InputSet, but as we usually only test 2, max 4, the cleaner writing got
-# # presedence
-#     for my $input_set (@{$input_sets}){
-#       my $exp = $input_set->get_Experiment;
-
-#       for my $input_set_2 (@{$input_sets}){
-#         my $exp_2 = $input_set->get_Experiment;
-
-#         if($exp->dbID != $exp_2->dbID){
-#           say '1: Name: '.$input_set->name.'dbID: '.$input_set->dbID;
-#           say '2: Name: '.$input_set_2->name.'dbID: '.$input_set_2->dbID;
-#           throw("InputSets belong to different Experiments");
-#         }
-#       }
-#       my @subsets = @{$input_set->get_InputSubsets};
-
-#       for my $subset(@subsets){
-#         my $ss_exp = $subset->experiment;
-#         if($ss_exp->dbID != $exp->dbID){
-#           if ($ss_exp->is_control != 1){
-#             say 'Subset dbID: '   . $ss_exp->dbID . 'Name: ' . $ss_exp->name;
-#             say 'InputSet dbID: ' . $exp->dbID  . 'Name: ' . $exp->name;
-#             throw("Experiment from InputSubset differs from Experiment in InputSet");
-#           }
-#           else {
-#             push(@{$cfg->{add_control_exp}}, $ss_exp);
-#           }
-#         } # exp_id dont match
-#       } # for subset
-#     } # input_set
-#   } # defined input_sets
-
-# # tested that all names are the same
-# #return $input_sets->[0]->name;
-# if(! defined $input_sets->[0]){
-#   say 'Line: ' . __LINE__;
-#   print dump_data($input_sets,1,1);
-  
-# }
-#   my $experiment  = $input_sets->[0]->get_Experiment;
-#   my $exp_group   = $input_sets->[0]->get_Experiment->experimental_group;
-#   return($experiment, $exp_group);
-# } ## --- end sub _compare_inputset_experiments
-# sub _migrate_regulatory_feature {
-#   my ($cfg, $tr_ds) = @_;
-
-#   my $dev = {};
-#   my $ds_diffs = {};
-
-#   my $ds_name = $tr_ds->name;
-
-#   # DS in dev?
-#   my $dev_ds = $cfg->{dev_adaptors}->{ds}->fetch_by_name($tr_ds->name);
-#   if(defined $dev_ds){
-#     _compare_data_set($ds_diffs, $tr_ds->name, 'CellType');
-#     $dev->{data_set} = $dev_ds;
-#   }
-
-#   # Fetch all supporting sets
-#   for my $tr_fset (@{$tr_ds->get_supporting_sets}){
-
-#     # Make sure the supporting set is indeed a FeatureSet
-#     $cfg->{dba_tracking}->is_stored_and_valid('Bio::EnsEMBL::Funcgen::FeatureSet', $tr_fset);
-
-#     if($tr_fset->cell_type->name ne $tr_ds->cell_type->name){
-#       my $msg;
-#       $msg .= "[Tr] FeatureSet [" .$tr_fset->name. "] is linked to a different CellType [";
-#       $msg .= $tr_fset->cell_type->name ."] than tracking DataSet object [";
-#       $msg .= $tr_ds->cell_type->name."]";
-#       throw($msg);
-#     }
-    
-#     # FS in dev?
-#     my $dev_fset = $cfg->{tr_adaptors}->{fs}->fetch_by_name($tr_fset->name);
-#     if(defined($dev_fset)){
-#       #cell_type
-
-#       #feature_       
-#       my $fs_diffs = _compare_feature_set($tr_ds, $tr_fset, $dev_fset);
-#       $dev->{feature_set} = $dev_fset;
-
-#           }
-    
-#     my $dev_ft= $cfg->{dev_adaptors}->{ft}->fetch_by_name($tr_ds->feature_type->name);
-#     if(defined $dev_ft){
-#       _compare_feature_type($tr_ds, $dev_ds, $tr_ds->feature_type, $dev_ft);
-#       $dev->{feature_type} = $dev->feature_type
-#     }
-#   }
-#   die;
-# }
-
-# as annotated features are linked
-# if(! defined $dev->{feature_set}){
-    
-#   my $tr_input_set   = $tr->{feature_set}->get_InputSet;
-#   my $dev_input_set;
-
-# #Can have an InputSet linked or not
-#   if(!defined $tr_input_set){
-#     $dev_input_set = undef;
-#   }
-#   else{
-#     my $name       = $tr_input_set->name;
-#     $dev_input_set = $cfg->{dev_adaptors}->{input_set}->fetch_by_name($name);
-
-#     if(!defined $dev_input_set){
-#       _print_info($tr, 'Tracking');
-#       _print_info($dev, 'Dev');
-#       my $fs_name = $tr->{feature_set}->name;
-#       my $msg;
-#       $msg  = "FeatureSet '$name'. Linked InputSet '$name' could not be fetched from devDB. ";
-#       $msg .= "InputSets stored in the DB are retrieved by running:";
-#       $msg .= "DataSet->get_supporting_sets('input')";
-#       $msg .= "See prinout above for all currently stored InputSets";
-#       throw($msg);
-#     }
-#   }
-#   my $dev_analysis   = _get_dev_analysis($cfg, $tr->{feature_set});
-
-#   $dev->{feature_set} = create_Storable_clone($tr->{feature_set},{
-#       -analysis     => $dev_analysis,
-#       -cell_type    => $dev->{cell_type},
-#       -feature_type => $dev->{feature_type},
-#       -input_set    => $dev_input_set,
-#       });
-#   ($dev->{feature_set}) =  @{$cfg->{dev_adaptors}->{feature_set}->store($dev->{feature_set})};
-
-# #_migrate_annotated_feature($cfg, $dev->{feature_set});
-#   }
-
-# if( !defined $dev->{result_sets} && defined $tr->{result_sets} ){
-#   foreach my $tr_result_set (@{$tr->{result_sets}}) {
-#     _store_result_set($cfg, $tr_rs, $tr, $dev);
-
-#     my $dev_analysis   = _get_dev_analysis($cfg, $tr_result_set);
-#     my $dev_support    = $tr_result_set->get_support;
-
-#     my $states = $tr_result_set->get_all_states;
-#     $tr_result_set->{states} = [];
-
-#       my $dev_result_set = create_Storable_clone($tr_result_set, {
-#         -analysis     => $dev_analysis,
-#         -feature_type => $dev->{feature_type},
-#         -cell_type    => $dev->{cell_type},
-#         -support      => $dev->{input_sets},
-#         });
-
-#     ($dev_result_set) = @{$cfg->{dev_adaptors}->{result_set}->store($dev_result_set)};
-#     _states($cfg, $states, $dev_result_set);
-#     $cfg->{dev_adaptors}->{input_set}->store_states($dev_result_set);
-
-#     push(@{$dev->{result_sets}}, $dev_result_set);
-#   }
