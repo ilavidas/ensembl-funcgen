@@ -9,13 +9,13 @@ export PERL5LIB=$PWD/bioperl-live-bioperl-release-1-2-3:$PWD/ensembl/modules:$PW
 echo "Running test suite"
 echo "Using $PERL5LIB"
 
-# skipping existing tests that are failing
+# skipping existing failing tests
 SKIP_TESTS="--skip AnnotatedFeature.t,Annotated_SetFeatureAdaptor.t,BaseFeatureAdaptor.t,BindingMatrix_MotifFeature.t,DataSet.t,DNAMethylationFeature.t,ExperimentalGroup.t,FeatureSet.t,FeatureType.t,InputSet_Set_BaseAdaptor.t,MultiTestDB.t,RegulatoryFeature.t,ResultFeature.t,ResultSet.t,Storable.t"
 
 if [ "$COVERALLS" = 'true' ]; then
-  PERL5OPT='-MDevel::Cover=+ignore,bioperl,+ignore,ensembl-test' perl $PWD/ensembl-test/scripts/runtests.pl -verbose $PWD/modules/t/Array_ArrayChip.t $SKIP_TESTS
+  PERL5OPT='-MDevel::Cover=+ignore,bioperl,+ignore,ensembl-test' perl $PWD/ensembl-test/scripts/runtests.pl -verbose $PWD/modules/t/ $SKIP_TESTS
 else
-  perl $PWD/ensembl-test/scripts/runtests.pl $PWD/modules/t/Array_ArrayChip.t $SKIP_TESTS
+  perl $PWD/ensembl-test/scripts/runtests.pl $PWD/modules/t/ $SKIP_TESTS
 fi
 
 rt=$?

@@ -8,7 +8,7 @@ use Bio::EnsEMBL::Funcgen::Array;
 
 use Bio::EnsEMBL::Test::TestUtils qw( test_getter_setter debug );
 use Bio::EnsEMBL::Test::MultiTestDB;
-use Data::Dumper;
+
 BEGIN { $| = 1;
 	use Test;
 	plan tests => 23;
@@ -21,9 +21,9 @@ debug( "Startup test" );
 ok(1);
 
 my $multi = Bio::EnsEMBL::Test::MultiTestDB->new();
-print Dumper($multi);
+
 my $db = $multi->get_DBAdaptor( "funcgen" );
-print Dumper($db);
+
 debug( "Test database instatiated" );
 ok( $db );
 
