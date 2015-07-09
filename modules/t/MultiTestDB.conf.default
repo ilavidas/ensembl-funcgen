@@ -1,10 +1,4 @@
 {
-  'port'   => $PORT,
-  'driver' => 'mysql',
-  'user'   => $USER,
-  'pass'   => $PASS,
-  'host'   => $HOST,
-  
   # add a line with the dbname and module
   'databases' => {
     'homo_sapiens' => { 
