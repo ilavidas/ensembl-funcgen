@@ -2,8 +2,8 @@ language: "perl"
 
 perl:
   - "5.14"
-  # - "5.12"
-  # - "5.10"
+  - "5.12"
+  - "5.10"
 
 env:
   - COVERALLS=true  DB=mysql
@@ -22,6 +22,7 @@ install:
     - cpanm -v --installdeps --with-recommends --notest --cpanfile ensembl/cpanfile .
     - cpanm -n Devel::Cover::Report::Coveralls
     - cpanm -n DBD::SQLite
+    - cpanm -n Data::Dumper
     - cp travisci/MultiTestDB.conf modules/t/MultiTestDB.conf
 
 script: "./travisci/harness.sh"
