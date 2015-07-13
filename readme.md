@@ -1,3 +1,5 @@
+[![Coverage Status](https://coveralls.io/repos/ilavidas/ensembl-funcgen/badge.svg?branch=master&service=github)](https://coveralls.io/github/ilavidas/ensembl-funcgen?branch=master)
+
 # ensembl-funcgen
 The Ensembl Funcgen API (Application Programme Interface) serves as a middle layer between the underlying MySQL database and aims to encapsulate the database layout by providing high level access to the database. The team providing the data is Ensembl Regulation, but for historic reasons, the API and databases are called Funcgen.
 
