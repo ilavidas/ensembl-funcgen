@@ -40,3 +40,6 @@ bioperl*.zip
 /.settings
 /.includepath
 *delme*
+bioperl-live-bioperl-release-1-2-3/
+ensembl-test/
+ensembl/
